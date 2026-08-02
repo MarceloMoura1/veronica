@@ -35,21 +35,27 @@ class ConversationContextBuilder:
         "identity": 5, "personal": 7, "preference": 5, "overview": 12,
         "standard": 12, "operations": 16, "goals": 14, "relationship": 8,
         "future": 20, "detail": 30,
+        "event": 10, "decision": 10, "plan": 10,
     }
 
     def __init__(self, memory_manager, max_context_chars: int = 7000):
         self.memory = memory_manager
         self.resolver = EntityResolver(memory_manager)
         self.max_context_chars = max_context_chars
-        self.current_subject = None
+        continuity = memory_manager.get_category("continuity")
+        last_subject = continuity.get("last_subject")
+        self.current_subject = dict(last_subject) if isinstance(last_subject, dict) else None
         self.previous_subjects = []
 
     def build_context(self, user_text: str, channel: str = "text") -> dict:
         query = (user_text or "").strip()
         intent = self.resolver.resolve_intent(query)
+        if intent == "session_resume" and getattr(self, "conversation_state", None):
+            return self._session_resume_context(query, channel)
+        nonsemantic_greeting = self.resolver.is_nonsemantic_greeting(query)
         resolved = self.resolver.resolve_entity(query)
         prior_subject = self.current_subject
-        if resolved is None and prior_subject and self.resolver.is_continuation(query):
+        if not nonsemantic_greeting and resolved is None and prior_subject and self.resolver.is_continuation(query):
             resolved = dict(prior_subject)
         elif resolved:
             if self.current_subject and self.current_subject["name"] != resolved["name"]:
@@ -57,7 +63,9 @@ class ConversationContextBuilder:
             self.current_subject = dict(resolved)
 
         items = []
-        if resolved:
+        if nonsemantic_greeting:
+            items = []
+        elif resolved:
             items.extend(self._entity_items(resolved, intent))
             if (
                 resolved["category"] == "people" and prior_subject
@@ -67,6 +75,8 @@ class ConversationContextBuilder:
                 items.extend(self._project_person_items(prior_subject["name"], resolved["name"]))
         else:
             items.extend(self._general_items(query, intent))
+
+        items.extend(self._conversational_items(query, resolved, intent))
 
         items = self._deduplicate(items)
         context = self._format_context(items)
@@ -83,6 +93,29 @@ class ConversationContextBuilder:
             "items": items,
             "item_count": len(items),
             "context": context,
+        }
+
+    def _session_resume_context(self, query, channel):
+        state = self.conversation_state.snapshot()
+        topic = state.get("last_meaningful_topic") or state.get("active_topic")
+        resolved = self.resolver.resolve_entity(topic or "")
+        if resolved:
+            self.current_subject = dict(resolved)
+        restored = self.conversation_state.build_restoration_context(self.memory)
+        has_context = bool(state.get("important_turns") or state.get("conversation_summary"))
+        prefix = (
+            "Session resume context is available. Answer what the prior conversation was about; "
+            "never claim that no recent context is saved.\n"
+            if has_context else "No prior session context is available.\n"
+        )
+        context = prefix + restored
+        print(
+            f"[MEMORY_CONTEXT] channel={channel} query={query!r} entity={topic or '-'} "
+            f"intent=session_resume has_context={has_context}"
+        )
+        return {
+            "query": query, "channel": channel, "entity": topic, "intent": "session_resume",
+            "items": [], "item_count": 0, "context": context, "has_context": has_context,
         }
 
     def _entity_items(self, entity, intent):
@@ -169,6 +202,33 @@ class ConversationContextBuilder:
                 if len(items) >= limit:
                     break
         return items
+
+    def _conversational_items(self, query, resolved, intent):
+        entity_name = resolved["name"] if resolved else None
+        records = []
+        if intent == "event":
+            source = self.memory.get_recent_events(limit=20)
+        elif intent == "decision":
+            source = self.memory.get_recent_decisions(limit=20)
+        elif intent == "plan":
+            source = self.memory.get_recent_plans(limit=20)
+        else:
+            return records
+        normalized_query = normalize_text(query)
+        for record in source:
+            related = not entity_name
+            if entity_name:
+                related = entity_name in record.get("entities", []) or record.get("project") == entity_name
+            if not related and entity_name:
+                haystack = normalize_text(json.dumps(record, ensure_ascii=False))
+                related = normalize_text(entity_name) in haystack
+            if related:
+                memory_id = record.get("id", "recent")
+                value = {key: value for key, value in record.items() if key != "source_turn_normalized"}
+                records.append(self._item(intent + "s", memory_id, "record", value))
+            if len(records) >= self.INTENT_LIMITS[intent]:
+                break
+        return records
 
     @staticmethod
     def _item(category, entity, field, value):

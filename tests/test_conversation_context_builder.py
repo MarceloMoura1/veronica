@@ -167,3 +167,16 @@ def test_text_and_live_integrations_call_the_shared_builder():
     assert '"name": "retrieve_memory"' in ada_source
     assert 'query, channel="voice"' in ada_source
     assert 'confirmation_required = False if fc.name == "retrieve_memory"' in ada_source
+
+
+def test_current_subject_never_scopes_global_memory(builder):
+    sequence = (
+        ("O que é o MegaDesk?", "MegaDesk", "SaaS empresarial"),
+        ("O que fazemos na FaYerS?", "FaYerS", "SolidWorks"),
+        ("Quem é Pedro?", "Pedro", "Melhor amigo"),
+        ("Voltando ao MegaDesk, qual a meta?", "MegaDesk", "100 clientes"),
+    )
+    for query, entity, expected in sequence:
+        result = builder.build_context(query)
+        assert result["entity"] == entity
+        assert expected in result["context"]

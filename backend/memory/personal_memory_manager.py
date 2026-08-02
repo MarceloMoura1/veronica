@@ -15,7 +15,10 @@ from typing import Any
 
 
 class PersonalMemoryManager:
-    CATEGORIES = ("profile", "preferences", "people", "facts", "projects")
+    CATEGORIES = (
+        "profile", "preferences", "people", "facts", "projects",
+        "events", "decisions", "plans", "continuity",
+    )
     MAX_IMPORT_BYTES = 256 * 1024
 
     def __init__(self, storage_dir: str | Path | None = None):
@@ -117,6 +120,55 @@ class PersonalMemoryManager:
             raise ValueError(f"Unknown memory category: {category}")
         with self._lock:
             return dict(self._data[category])
+
+    def save_memory_record(self, category: str, memory_id: str, record: dict[str, Any]) -> None:
+        if category not in {"events", "decisions", "plans"}:
+            raise ValueError(f"Unsupported conversational memory category: {category}")
+        self._set(category, memory_id, record)
+
+    def update_continuity(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            self._data["continuity"].update(values)
+            self._save("continuity")
+
+    def get_recent_memories(self, limit: int = 10) -> list[dict[str, Any]]:
+        records = []
+        for category in ("events", "decisions", "plans"):
+            for memory_id, record in self._data[category].items():
+                if isinstance(record, dict):
+                    records.append({"id": memory_id, "category": category, **record})
+        return sorted(
+            records,
+            key=lambda item: item.get("updated_at") or item.get("recorded_at") or "",
+            reverse=True,
+        )[:limit]
+
+    def get_recent_events(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self._recent_category("events", limit)
+
+    def get_recent_decisions(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self._recent_category("decisions", limit)
+
+    def get_active_plans(self, limit: int = 10) -> list[dict[str, Any]]:
+        return [
+            record for record in self._recent_category("plans", limit * 2)
+            if record.get("status") in {"planned", "tentative"}
+        ][:limit]
+
+    def get_recent_plans(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self._recent_category("plans", limit)
+
+    def _recent_category(self, category: str, limit: int) -> list[dict[str, Any]]:
+        records = [
+            {"id": memory_id, **record}
+            for memory_id, record in self._data[category].items()
+            if isinstance(record, dict)
+        ]
+        return sorted(
+            records,
+            key=lambda item: item.get("updated_at") or item.get("recorded_at") or "",
+            reverse=True,
+        )[:limit]
 
     def import_memory_text(self, text: str, source_name: str | None = None) -> dict[str, Any]:
         """Parse and merge a human-editable Veronica Memory Pack V1."""
@@ -267,6 +319,8 @@ class PersonalMemoryManager:
         query_terms = self._terms(query)
         results = []
         for category, items in self._data.items():
+            if category in {"events", "decisions", "plans", "continuity"}:
+                continue
             for key, value in items.items():
                 terms = self._terms(f"{key} {json.dumps(value, ensure_ascii=False)}")
                 score = len(query_terms & terms)

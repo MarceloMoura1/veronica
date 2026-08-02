@@ -27,7 +27,7 @@ if sys.version_info < (3, 11, 0):
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
 from tools import tools_list
-from memory import ConversationContextBuilder, PersonalMemoryManager
+from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -211,7 +211,10 @@ retrieve_memory_tool = {
         "Retrieves authoritative persistent personal context for Marcelo. You MUST call this "
         "before answering questions about Marcelo, his family, known people, preferences, goals, "
         "companies or projects (including FaYerS, MegaDesk, Jarvis and Veronica), and follow-up "
-        "questions that refer to a previously discussed personal subject. Pass the user's complete request."
+        "questions that refer to a previously discussed personal subject. You MUST also call it for "
+        "session-resume questions such as 'o que a gente tava conversando?', 'onde paramos?', "
+        "'qual era o assunto?' or 'o que eu estava te contando?', even when no entity is named. "
+        "Pass the user's complete request."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -237,6 +240,8 @@ config = types.LiveConnectConfig(
     f"{identity_note} "
     "For every request about Marcelo, his personal life, family, known people, preferences, goals, "
     "companies, projects, or a follow-up about such a subject, call retrieve_memory before answering. "
+    "For any request to resume or recall the prior conversation, always call retrieve_memory before answering, "
+    "even if Marcelo names no person or project. Never claim there is no saved context without calling it. "
     "Treat retrieved facts as authoritative. Answer naturally and never say 'based on my memory'. "
     "If retrieval returns no relevant facts, say you do not have that information instead of inventing it. "
     "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing."
@@ -259,7 +264,7 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, output_device_name=None, conversation_context_builder=None, kasa_agent=None):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, output_device_name=None, conversation_context_builder=None, conversational_memory_analyzer=None, kasa_agent=None):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -277,6 +282,9 @@ class AudioLoop:
         self.output_device_index = output_device_index
         self.output_device_name = output_device_name
         self.conversation_context_builder = conversation_context_builder or ConversationContextBuilder(_personal_memory)
+        self.conversational_memory_analyzer = conversational_memory_analyzer or ConversationalMemoryAnalyzer(
+            _personal_memory, self.conversation_context_builder
+        )
         self._voice_input_chunk_logged = False
         self._voice_input_queue_logged = False
         self._voice_input_signal_logged = False
@@ -294,6 +302,9 @@ class AudioLoop:
         # Track last transcription text to calculate deltas (Gemini sends cumulative text)
         self._last_input_transcription = ""
         self._last_output_transcription = ""
+        self._voice_turn_text = ""
+        self._assistant_turn_text = ""
+        self._cold_start_context_sent = False
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -747,6 +758,7 @@ class AudioLoop:
         "Background task to reads from the websocket and write pcm chunks to the output queue"
         try:
             while True:
+                voice_turn_complete = False
                 turn = self.session.receive()
                 async for response in turn:
                     if not self._voice_receive_logged:
@@ -762,6 +774,8 @@ class AudioLoop:
 
                     # 2. Handle Transcription (User & Model)
                     if response.server_content:
+                        if response.server_content.turn_complete:
+                            voice_turn_complete = True
                         if response.server_content.input_transcription:
                             transcript = response.server_content.input_transcription.text
                             if transcript:
@@ -775,6 +789,7 @@ class AudioLoop:
                                     
                                     # Only send if there's new text
                                     if delta:
+                                        self._voice_turn_text += delta
                                         # User is speaking, so interrupt model playback!
                                         self.clear_audio_queue()
 
@@ -806,6 +821,7 @@ class AudioLoop:
                                     
                                     # Only send if there's new text
                                     if delta:
+                                        self._assistant_turn_text += delta
                                         # Send to frontend (Streaming)
                                         if self.on_transcription:
                                              self.on_transcription({"sender": "ADA", "text": delta})
@@ -1244,9 +1260,19 @@ class AudioLoop:
                                     function_responses.append(function_response)
                         if function_responses:
                             await self.session.send_tool_response(function_responses=function_responses)
-                
-                # Turn/Response Loop Finished
-                self.flush_chat()
+
+                # Tool calls can end an intermediate receive() without ending the turn.
+                # Persist only after Gemini explicitly marks the complete turn.
+                if voice_turn_complete:
+                    learning_result = self._process_completed_voice_turn()
+                    self._process_completed_assistant_turn()
+                    if learning_result and learning_result.get("reason") == "greeting":
+                        restoration = self.conversational_memory_analyzer.build_cold_start_context()
+                        if restoration:
+                            print(f"[CONVERSATION_STATE] refreshing after greeting chars={len(restoration)}")
+                            await self.session.send(input=restoration, end_of_turn=False)
+                    # Reset STT delta tracking only with the actual completed turn.
+                    self.flush_chat()
 
                 while not self.audio_in_queue.empty():
                     self.audio_in_queue.get_nowait()
@@ -1255,6 +1281,23 @@ class AudioLoop:
             traceback.print_exc()
             # CRITICAL: Re-raise to crash the TaskGroup and trigger outer loop reconnect
             raise e
+
+    def _process_completed_voice_turn(self):
+        completed_voice_turn = self._voice_turn_text.strip()
+        self._voice_turn_text = ""
+        if not completed_voice_turn:
+            return None
+        return self.conversational_memory_analyzer.process_conversation_turn(
+            completed_voice_turn,
+            channel="voice",
+            conversation_context={"current_subject": self.conversation_context_builder.current_subject},
+        )
+
+    def _process_completed_assistant_turn(self):
+        completed_turn = self._assistant_turn_text.strip()
+        self._assistant_turn_text = ""
+        if completed_turn:
+            self.conversational_memory_analyzer.record_assistant_turn(completed_turn)
 
     async def play_audio(self):
         stream = None
@@ -1345,6 +1388,15 @@ class AudioLoop:
 
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
+
+                    # A new process has no Gemini history. Preload persisted state
+                    # silently before opening normal microphone input.
+                    if not is_reconnect and not self._cold_start_context_sent:
+                        restoration = self.conversational_memory_analyzer.build_cold_start_context()
+                        if restoration:
+                            print(f"[CONVERSATION_STATE] cold-start restore chars={len(restoration)}")
+                            await self.session.send(input=restoration, end_of_turn=False)
+                        self._cold_start_context_sent = True
 
                     tg.create_task(self.send_realtime(), name="voice_send")
                     tg.create_task(self.listen_audio(), name="voice_input")

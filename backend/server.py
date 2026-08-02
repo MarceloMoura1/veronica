@@ -25,7 +25,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import ada
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
-from memory import ConversationContextBuilder, PersonalMemoryManager
+from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -59,6 +59,7 @@ kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
 personal_memory = PersonalMemoryManager()
 conversation_context = ConversationContextBuilder(personal_memory)
+conversational_memory = ConversationalMemoryAnalyzer(personal_memory, conversation_context)
 
 DEFAULT_SETTINGS = {
     "face_auth_enabled": False, # Default OFF as requested
@@ -297,6 +298,7 @@ async def start_audio(sid, data=None):
             input_device_name=device_name,
             output_device_name=output_device_name,
             conversation_context_builder=conversation_context,
+            conversational_memory_analyzer=conversational_memory,
             kasa_agent=kasa_agent
         )
         print("[VOICE_LOOP] AudioLoop created")
@@ -468,14 +470,17 @@ async def user_input(sid, data):
     if text:
         print(f"[SERVER DEBUG] Sending message to model: '{text}'")
 
-        captured = personal_memory.capture_explicit_memory(text)
         memory_result = conversation_context.build_context(text, channel="text")
+        learning_result = conversational_memory.process_conversation_turn(
+            text, channel="text", conversation_context=memory_result
+        )
         relevant_memory = memory_result["context"]
         model_input = text
-        if captured:
+        if learning_result.get("confidence", 0) >= 0.98 and learning_result.get("action") == "created":
             model_input = (
                 "System Notification: The user explicitly asked you to remember the following item. "
-                f"It has been persisted successfully: {captured}. Confirm this briefly.\n\nUser message: {text}"
+                "It has been persisted successfully. Confirm this briefly.\n\n"
+                f"User message: {text}"
             )
         elif relevant_memory:
             model_input = f"System Notification:\n{relevant_memory}\n\nUser message: {text}"

@@ -2,5 +2,7 @@
 
 from .personal_memory_manager import PersonalMemoryManager
 from .conversation_context_builder import ConversationContextBuilder
+from .conversation_state_manager import ConversationStateManager
+from .conversational_memory_analyzer import ConversationalMemoryAnalyzer
 
-__all__ = ["ConversationContextBuilder", "PersonalMemoryManager"]
+__all__ = ["ConversationContextBuilder", "ConversationStateManager", "ConversationalMemoryAnalyzer", "PersonalMemoryManager"]

@@ -60,6 +60,16 @@ class EntityResolver:
                 normalized_alias = normalize_text(alias)
                 if re.search(rf"(?:^|\s){re.escape(normalized_alias)}(?:$|\s)", normalized):
                     candidates.append((len(normalized_alias.split()), len(normalized_alias), key, "facts"))
+        vocative = bool(re.match(r"^(?:(?:bom dia|boa tarde|boa noite|oi|ola) )?veronica(?: |$)", normalized))
+        if vocative and any(candidate[2] != "Veronica" for candidate in candidates):
+            candidates = [candidate for candidate in candidates if candidate[2] != "Veronica"]
+        if self.is_nonsemantic_greeting(query):
+            return None
+        vocative = bool(re.match(r"^(?:(?:bom dia|boa tarde|boa noite|oi|ola) )?veronica(?: |$)", normalized))
+        if vocative and any(candidate[2] != "Veronica" for candidate in candidates):
+            candidates = [candidate for candidate in candidates if candidate[2] != "Veronica"]
+        if self.is_nonsemantic_greeting(query):
+            return None
         if not candidates:
             return None
         _, _, name, category = max(candidates)
@@ -69,6 +79,17 @@ class EntityResolver:
     def resolve_intent(query: str) -> str:
         normalized = normalize_text(query)
         patterns = (
+            ("session_resume", ("o que a gente tava conversando", "o que a gente estava conversando",
+                "o que estavamos conversando", "onde a gente parou", "onde paramos",
+                "o que eu estava te contando", "do que eu estava falando", "qual era o assunto",
+                "voltando ao assunto", "continua de onde paramos", "lembra do que estavamos falando")),
+            ("session_resume", ("o que a gente tava conversando", "o que a gente estava conversando",
+                "o que estavamos conversando", "onde a gente parou", "onde paramos",
+                "o que eu estava te contando", "do que eu estava falando", "qual era o assunto",
+                "voltando ao assunto", "continua de onde paramos", "lembra do que estavamos falando")),
+            ("decision", ("o que decidimos", "tinha decidido", "tinham decidido", "decisao", "decidimos", "foi decidido", "definimos")),
+            ("plan", ("o que eu ia fazer", "o que eu tinha planejado", "o que planejei", "planejado", "meu plano", "planos ativos")),
+            ("event", ("o que aconteceu", "como esta", "como ele esta", "como ela esta", "ele ficou bem", "ela ficou bem", "o que houve", "depois")),
             ("operations", ("o que fazemos", "o que a gente faria", "o que fariamos", "fariamos", "como funciona", "operacao", "servicos", "faria nela")),
             ("detail", ("detalhes", "mais detalhes", "detalhadamente", "aprofundar", "conte mais")),
             ("goals", ("qual a meta", "qual e a meta", "objetivo", "primeiro ano", "meta")),
@@ -85,10 +106,36 @@ class EntityResolver:
         return "standard"
 
     @staticmethod
+    def is_nonsemantic_greeting(query: str) -> bool:
+        normalized = normalize_text(query)
+        if normalized in {"veronica", "oi", "ola", "bom dia", "boa tarde", "boa noite",
+                          "tudo bem", "esta me ouvindo", "voce esta me ouvindo"}:
+            return True
+        greeting = re.match(r"^(?:oi|ola|bom dia|boa tarde|boa noite) veronica(?: (.*))?$", normalized)
+        if not greeting:
+            return False
+        remainder = greeting.group(1) or ""
+        return not remainder or any(marker in remainder for marker in ("esta me ouvindo", "tudo bem", "me escuta"))
+
+    @staticmethod
+    def is_nonsemantic_greeting(query: str) -> bool:
+        normalized = normalize_text(query)
+        if normalized in {"veronica", "oi", "ola", "bom dia", "boa tarde", "boa noite",
+                          "tudo bem", "esta me ouvindo", "voce esta me ouvindo"}:
+            return True
+        greeting = re.match(r"^(?:oi|ola|bom dia|boa tarde|boa noite) veronica(?: (.*))?$", normalized)
+        if not greeting:
+            return False
+        remainder = greeting.group(1) or ""
+        return not remainder or any(marker in remainder for marker in ("esta me ouvindo", "tudo bem", "me escuta"))
+
+    @staticmethod
     def is_continuation(query: str) -> bool:
         normalized = normalize_text(query)
         markers = (
             "mais detalhes", "nela", "nele", "nessa empresa", "nesse projeto",
-            "e como", "e qual", "qual a meta", "o que a gente faria", "e o",
+            "e como", "como ele", "como ela", "e ele", "e ela", "e isso", "e aquilo",
+            "esse projeto", "essa empresa", "o assunto", "voltando", "onde a gente parou",
+            "e qual", "qual a meta", "o que a gente faria", "e o",
         )
         return any(marker in normalized for marker in markers)

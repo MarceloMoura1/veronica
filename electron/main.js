@@ -10,6 +10,26 @@ app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
 let mainWindow;
 let pythonProcess;
+let pythonBackendStopped = false;
+
+function isProcessNotFoundError(error) {
+    const output = [error && error.message, error && error.stdout, error && error.stderr]
+        .filter(Boolean)
+        .map((value) => value.toString())
+        .join(' ')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+
+    return [
+        'process not found',
+        'processo nao foi encontrado',
+        'nao foi encontrado',
+        'no running instance',
+        'nao ha instancia',
+        'nenhuma instancia',
+    ].some((message) => output.includes(message));
+}
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -68,17 +88,29 @@ function startPythonBackend() {
     console.log(`Starting Python backend: ${scriptPath}`);
 
     // Assuming 'python' is in PATH. In prod, this would be the executable.
-    pythonProcess = spawn('python', [scriptPath], {
+    const startedProcess = spawn('python', [scriptPath], {
         cwd: path.join(__dirname, '../backend'),
     });
+    pythonProcess = startedProcess;
+    pythonBackendStopped = false;
 
-    pythonProcess.stdout.on('data', (data) => {
+    startedProcess.stdout.on('data', (data) => {
         console.log(`[Python]: ${data}`);
     });
 
-    pythonProcess.stderr.on('data', (data) => {
+    startedProcess.stderr.on('data', (data) => {
         console.error(`[Python Error]: ${data}`);
     });
+
+    const clearStoppedProcess = (code, signal) => {
+        if (pythonProcess !== startedProcess) return;
+        pythonProcess = null;
+        pythonBackendStopped = true;
+        console.log(`Python backend stopped${signal ? ` (signal: ${signal})` : code !== null ? ` (code: ${code})` : ''}.`);
+    };
+
+    startedProcess.once('exit', clearStoppedProcess);
+    startedProcess.once('close', clearStoppedProcess);
 }
 
 app.whenReady().then(() => {
@@ -171,20 +203,50 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
-    console.log('App closing... Killing Python backend.');
-    if (pythonProcess) {
-        if (process.platform === 'win32') {
-            // Windows: Force kill the process tree synchronously
-            try {
-                const { execSync } = require('child_process');
-                execSync(`taskkill /pid ${pythonProcess.pid} /f /t`);
-            } catch (e) {
-                console.error('Failed to kill python process:', e.message);
-            }
-        } else {
-            // Unix: SIGKILL
-            pythonProcess.kill('SIGKILL');
+    console.log('App closing...');
+    if (!pythonProcess) {
+        if (pythonBackendStopped) {
+            console.log('Python backend already stopped.');
         }
+        return;
+    }
+
+    if (pythonProcess.exitCode !== null || pythonProcess.signalCode !== null) {
         pythonProcess = null;
+        pythonBackendStopped = true;
+        console.log('Python backend already stopped.');
+        return;
+    }
+
+    const processToStop = pythonProcess;
+    if (process.platform === 'win32') {
+        // Windows: Force kill the active process tree synchronously.
+        try {
+            const { execSync } = require('child_process');
+            execSync(`taskkill /pid ${processToStop.pid} /f /t`, { stdio: 'pipe' });
+            console.log('Python backend stopped.');
+        } catch (error) {
+            if (isProcessNotFoundError(error)) {
+                console.log('Python backend already stopped.');
+            } else {
+                console.error('Failed to stop Python backend:', error.message);
+            }
+        }
+    } else {
+        try {
+            processToStop.kill('SIGKILL');
+            console.log('Python backend stopped.');
+        } catch (error) {
+            if (error.code === 'ESRCH') {
+                console.log('Python backend already stopped.');
+            } else {
+                console.error('Failed to stop Python backend:', error.message);
+            }
+        }
+    }
+
+    if (pythonProcess === processToStop) {
+        pythonProcess = null;
+        pythonBackendStopped = true;
     }
 });
