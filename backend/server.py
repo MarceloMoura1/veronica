@@ -25,6 +25,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import ada
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
+from memory import PersonalMemoryManager
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -56,6 +57,7 @@ loop_task = None
 authenticator = None
 kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
+personal_memory = PersonalMemoryManager()
 
 DEFAULT_SETTINGS = {
     "face_auth_enabled": False, # Default OFF as requested
@@ -456,6 +458,17 @@ async def user_input(sid, data):
 
     if text:
         print(f"[SERVER DEBUG] Sending message to model: '{text}'")
+
+        captured = personal_memory.capture_explicit_memory(text)
+        relevant_memory = personal_memory.get_relevant_context(text)
+        model_input = text
+        if captured:
+            model_input = (
+                "System Notification: The user explicitly asked you to remember the following item. "
+                f"It has been persisted successfully: {captured}. Confirm this briefly.\n\nUser message: {text}"
+            )
+        elif relevant_memory:
+            model_input = f"System Notification:\n{relevant_memory}\n\nUser message: {text}"
         
         # Log User Input to Project History
         if audio_loop and audio_loop.project_manager:
@@ -471,7 +484,7 @@ async def user_input(sid, data):
             except Exception as e:
                 print(f"[SERVER DEBUG] Failed to send piggyback frame: {e}")
                 
-        await audio_loop.session.send(input=text, end_of_turn=True)
+        await audio_loop.session.send(input=model_input, end_of_turn=True)
         print(f"[SERVER DEBUG] Message sent to model successfully.")
 
 import json

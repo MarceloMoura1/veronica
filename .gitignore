@@ -35,3 +35,6 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+
+# Veronica runtime personal memory
+data/memory/

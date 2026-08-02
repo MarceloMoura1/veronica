@@ -4,6 +4,8 @@ import io
 import os
 import sys
 import traceback
+import json
+from pathlib import Path
 from dotenv import load_dotenv
 import cv2
 import pyaudio
@@ -23,6 +25,7 @@ if sys.version_info < (3, 11, 0):
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
 from tools import tools_list
+from memory import PersonalMemoryManager
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -34,7 +37,27 @@ MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 DEFAULT_MODE = "camera"
 
 load_dotenv()
-client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
+
+IDENTITY_PATH = Path(__file__).parent / "config" / "assistant_identity.json"
+
+with open(IDENTITY_PATH, "r", encoding="utf-8") as f:
+    ASSISTANT_IDENTITY = json.load(f)
+
+assistant_name = ASSISTANT_IDENTITY["name"]
+assistant_full_name = ASSISTANT_IDENTITY["full_name"]
+owner_name = ASSISTANT_IDENTITY["owner_name"]
+owner_title = ASSISTANT_IDENTITY["owner_title"]
+personality = ASSISTANT_IDENTITY["personality"]
+identity_note = ASSISTANT_IDENTITY["identity_note"]
+
+# Persistent preferences complement (and take priority over) identity defaults.
+_personal_memory = PersonalMemoryManager()
+owner_title = _personal_memory.get_preference("preferred_title", owner_title)
+
+client = genai.Client(
+    http_options={"api_version": "v1beta"},
+    api_key=os.getenv("GEMINI_API_KEY")
+)
 
 # Function definitions
 generate_cad = {
@@ -188,11 +211,13 @@ config = types.LiveConnectConfig(
     # We switch these from [] to {} to enable them with default settings
     output_audio_transcription={}, 
     input_audio_transcription={},
-    system_instruction="Your name is Ada, which stands for Advanced Design Assistant. "
-        "You have a witty and charming personality. "
-        "Your creator is Naz, and you address him as 'Sir'. "
-        "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
-        "You have a fun personality.",
+    system_instruction=(
+    f"Your name is {assistant_name}, which stands for {assistant_full_name}. "
+    f"You are the personalized assistant of {owner_name}, and you address him as '{owner_title}'. "
+    f"Your personality is {personality}. "
+    f"{identity_note} "
+    "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing."
+),
     tools=tools,
     speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
