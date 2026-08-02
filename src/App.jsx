@@ -15,6 +15,7 @@ import AuthLock from './components/AuthLock';
 import KasaWindow from './components/KasaWindow';
 import PrinterWindow from './components/PrinterWindow';
 import SettingsWindow from './components/SettingsWindow';
+import Sidebar, { SectionPlaceholder } from './components/Sidebar';
 
 
 
@@ -22,6 +23,8 @@ const socket = io('http://localhost:8000');
 const { ipcRenderer } = window.require('electron');
 
 function App() {
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+    const [activeSection, setActiveSection] = useState('home');
     const [status, setStatus] = useState('Disconnected');
     const [socketConnected, setSocketConnected] = useState(socket.connected); // Track socket connection reactively
     // Auth State
@@ -1483,7 +1486,15 @@ function App() {
                 </div>
             </div>
 
+            <Sidebar
+                isOpen={isSidebarOpen}
+                activeSection={activeSection}
+                onToggle={() => setIsSidebarOpen((isOpen) => !isOpen)}
+                onSectionChange={setActiveSection}
+            />
+
             {/* Main Content */}
+            {activeSection === 'home' ? (
             <div className="flex-1 relative z-10 flex flex-col items-center justify-center">
                 {/* Central Visualizer (AI Audio) */}
                 <div
@@ -1722,6 +1733,9 @@ function App() {
                     onDeny={handleDenyTool}
                 />
             </div>
+            ) : (
+                <SectionPlaceholder section={activeSection} />
+            )}
         </div>
     );
 }
