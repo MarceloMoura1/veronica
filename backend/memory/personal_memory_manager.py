@@ -149,6 +149,12 @@ class PersonalMemoryManager:
     def get_recent_decisions(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._recent_category("decisions", limit)
 
+    def get_active_decisions(self, limit: int = 10) -> list[dict[str, Any]]:
+        return [
+            record for record in self._recent_category("decisions", limit * 3)
+            if record.get("status", "active") == "active"
+        ][:limit]
+
     def get_active_plans(self, limit: int = 10) -> list[dict[str, Any]]:
         return [
             record for record in self._recent_category("plans", limit * 2)
@@ -349,6 +355,15 @@ class PersonalMemoryManager:
             lines.append(f"- {item['category']}.{item['key']}: {value}")
             print(f"[MEMORY] retrieved {item['category']}.{item['key']}")
         return "\n".join(lines)
+
+    def search_global(self, query, entities=None, intent=None, time_filter=None, max_items=16):
+        """Structured Global Brain retrieval with explainable ranking."""
+        from .entity_resolver import EntityResolver
+        from .memory_intelligence import MemoryIntelligence
+        resolver = EntityResolver(self)
+        return MemoryIntelligence(self, resolver).search_global(
+            query, entities=entities, intent=intent, time_filter=time_filter, max_items=max_items
+        )
 
     def capture_explicit_memory(self, text: str) -> dict[str, Any] | None:
         """Capture deliberately stated, high-confidence Portuguese patterns."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from .entity_resolver import EntityResolver, normalize_text
+from .memory_intelligence import MemoryIntelligence
 
 
 class ConversationContextBuilder:
@@ -41,11 +42,15 @@ class ConversationContextBuilder:
     def __init__(self, memory_manager, max_context_chars: int = 7000):
         self.memory = memory_manager
         self.resolver = EntityResolver(memory_manager)
+        self.memory_intelligence = MemoryIntelligence(memory_manager, self.resolver)
         self.max_context_chars = max_context_chars
         continuity = memory_manager.get_category("continuity")
         last_subject = continuity.get("last_subject")
         self.current_subject = dict(last_subject) if isinstance(last_subject, dict) else None
         self.previous_subjects = []
+        self.current_entities = [dict(self.current_subject)] if self.current_subject else []
+        self.last_multi_entities = []
+        self.recent_entity_groups = []
 
     def build_context(self, user_text: str, channel: str = "text") -> dict:
         query = (user_text or "").strip()
@@ -53,6 +58,29 @@ class ConversationContextBuilder:
         if intent == "session_resume" and getattr(self, "conversation_state", None):
             return self._session_resume_context(query, channel)
         nonsemantic_greeting = self.resolver.is_nonsemantic_greeting(query)
+        resolved_entities = self.resolver.resolve_entities(query)
+        plural_reference = any(
+            marker in normalize_text(query)
+            for marker in ("nas duas", "nos dois", "as duas", "os dois", "ambos", "ambas")
+        )
+        if not resolved_entities and plural_reference:
+            plural_source = self.current_entities if len(self.current_entities) >= 2 else []
+            if not plural_source and self.current_subject:
+                plural_source = next((
+                    group for group in self.recent_entity_groups
+                    if any(entity["name"] == self.current_subject["name"] for entity in group)
+                ), [])
+            if not plural_source:
+                plural_source = self.last_multi_entities
+            if len(plural_source) >= 2:
+                resolved_entities = [dict(entity) for entity in plural_source[:4]]
+        if not nonsemantic_greeting and len(resolved_entities) > 1:
+            return self._multi_entity_context(query, channel, intent, resolved_entities)
+        time_filter = self.memory_intelligence.resolve_time_filter(query)
+        if not nonsemantic_greeting and intent in {"event", "decision", "plan"} and (
+            resolved_entities or time_filter or "ativos" in normalize_text(query)
+        ):
+            return self._ranked_memory_context(query, channel, intent, resolved_entities, time_filter)
         resolved = self.resolver.resolve_entity(query)
         prior_subject = self.current_subject
         if not nonsemantic_greeting and resolved is None and prior_subject and self.resolver.is_continuation(query):
@@ -61,6 +89,7 @@ class ConversationContextBuilder:
             if self.current_subject and self.current_subject["name"] != resolved["name"]:
                 self.previous_subjects = ([self.current_subject] + self.previous_subjects)[:4]
             self.current_subject = dict(resolved)
+            self.current_entities = [dict(resolved)]
 
         items = []
         if nonsemantic_greeting:
@@ -93,6 +122,85 @@ class ConversationContextBuilder:
             "items": items,
             "item_count": len(items),
             "context": context,
+            "entities": [entity_name] if entity_name else [],
+        }
+
+    def _multi_entity_context(self, query, channel, intent, entities):
+        previous = [dict(entity) for entity in self.current_entities]
+        self.current_entities = [dict(entity) for entity in entities]
+        self.last_multi_entities = [dict(entity) for entity in entities]
+        group_names = tuple(entity["name"] for entity in entities)
+        self.recent_entity_groups = [
+            [dict(entity) for entity in entities]
+        ] + [
+            group for group in self.recent_entity_groups
+            if tuple(entity["name"] for entity in group) != group_names
+        ]
+        self.recent_entity_groups = self.recent_entity_groups[:4]
+        focus = next((entity for entity in reversed(entities) if entity["category"] == "projects"), entities[0])
+        if self.current_subject and self.current_subject["name"] != focus["name"]:
+            self.previous_subjects = ([self.current_subject] + previous + self.previous_subjects)[:6]
+        self.current_subject = dict(focus)
+        entity_names = [entity["name"] for entity in entities]
+        max_items = 16 if len(entities) == 2 else 18
+        ranked = self.memory_intelligence.search_global(
+            query, entities=entities, intent=intent, max_items=max_items
+        )
+        items = [
+            {
+                "category": memory["category"], "entity": memory.get("entity"),
+                "field": memory["field"], "value": memory["value"],
+                "score": memory["score"], "reason": memory["reasons"],
+                "timestamp": memory.get("timestamp"),
+            }
+            for memory in ranked["selected_memories"]
+        ]
+        items = self._deduplicate(items)
+        context = self._format_context(items)
+        print(
+            f"[MEMORY_INTELLIGENCE] entities_resolved={entity_names} memories_selected={len(items)} "
+            f"context_chars={len(context)} ranking_ms={ranked['ranking_time_ms']:.2f}"
+        )
+        return {
+            "query": query, "channel": channel, "entity": focus["name"],
+            "entities": entity_names, "intent": intent, "items": items,
+            "item_count": len(items), "context": context,
+            "selected_memories": ranked["selected_memories"],
+            "ranking_time_ms": ranked["ranking_time_ms"],
+        }
+
+    def _ranked_memory_context(self, query, channel, intent, entities, time_filter=None):
+        if entities:
+            resolved = entities[0]
+            if self.current_subject and self.current_subject["name"] != resolved["name"]:
+                self.previous_subjects = ([self.current_subject] + self.previous_subjects)[:6]
+            self.current_subject = dict(resolved)
+            self.current_entities = [dict(resolved)]
+        ranked = self.memory_intelligence.search_global(
+            query, entities=entities, intent=intent, time_filter=time_filter,
+            max_items=self.INTENT_LIMITS.get(intent, 10),
+        )
+        items = [
+            {
+                "category": memory["category"], "entity": memory.get("entity"),
+                "field": memory["field"], "value": memory["value"],
+                "score": memory["score"], "reason": memory["reasons"],
+                "timestamp": memory.get("timestamp"),
+            }
+            for memory in ranked["selected_memories"]
+        ]
+        items = self._deduplicate(items)
+        context = self._format_context(items)
+        names = [entity["name"] for entity in entities]
+        print(
+            f"[MEMORY_INTELLIGENCE] entities_resolved={names} memories_selected={len(items)} "
+            f"context_chars={len(context)} ranking_ms={ranked['ranking_time_ms']:.2f}"
+        )
+        return {
+            "query": query, "channel": channel, "entity": names[0] if names else None,
+            "entities": names, "intent": intent, "items": items, "item_count": len(items),
+            "context": context, "selected_memories": ranked["selected_memories"],
+            "time_filter": ranked["time_filter"], "ranking_time_ms": ranked["ranking_time_ms"],
         }
 
     def _session_resume_context(self, query, channel):

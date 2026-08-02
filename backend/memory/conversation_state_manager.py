@@ -75,6 +75,22 @@ class ConversationStateManager:
     def record_assistant_turn(self, text):
         if (text := (text or "").strip()):
             with self._lock: self._append_turn("assistant", text); self._finish()
+    def record_active_entities(self, entities, focus=None):
+        names = [item.get("name") for item in entities if isinstance(item, dict) and item.get("name")]
+        if not names:
+            return
+        with self._lock:
+            for name in names:
+                self._state["active_entities"] = (
+                    [item for item in self._state["active_entities"] if item != name] + [name]
+                )[-8:]
+                self._state["recent_topics"] = (
+                    [item for item in self._state["recent_topics"] if item != name] + [name]
+                )[-6:]
+            topic = focus or names[-1]
+            self._state["active_topic"] = topic
+            self._state["last_meaningful_topic"] = topic
+            self._finish()
     def _append_turn(self, role, text):
         turns = list(self._state["important_turns"])
         if not turns or (turns[-1].get("role"), turns[-1].get("text")) != (role, text):
