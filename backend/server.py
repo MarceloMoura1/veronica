@@ -25,7 +25,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import ada
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
-from memory import PersonalMemoryManager
+from memory import ConversationContextBuilder, PersonalMemoryManager
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -58,6 +58,7 @@ authenticator = None
 kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
 personal_memory = PersonalMemoryManager()
+conversation_context = ConversationContextBuilder(personal_memory)
 
 DEFAULT_SETTINGS = {
     "face_auth_enabled": False, # Default OFF as requested
@@ -186,17 +187,23 @@ async def start_audio(sid, data=None):
             await sio.emit('error', {'msg': 'Authentication Required'})
             return
 
-    print("Starting Audio Loop...")
+    print(f"[VOICE_SERVER] start_audio received sid={sid}")
     
     device_index = None
     device_name = None
+    output_device_name = None
     if data:
         if 'device_index' in data:
             device_index = data['device_index']
         if 'device_name' in data:
             device_name = data['device_name']
+        if 'output_device_name' in data:
+            output_device_name = data['output_device_name']
             
-    print(f"Using input device: Name='{device_name}', Index={device_index}")
+    print(
+        f"[VOICE_SERVER] device_name={device_name!r} browser_index={device_index!r} "
+        f"output_device_name={output_device_name!r} muted={bool(data and data.get('muted'))}"
+    )
     
     if audio_loop:
         if loop_task and (loop_task.done() or loop_task.cancelled()):
@@ -272,7 +279,7 @@ async def start_audio(sid, data=None):
 
     # Initialize ADA
     try:
-        print(f"Initializing AudioLoop with device_index={device_index}")
+        print("[VOICE_LOOP] creating AudioLoop")
         audio_loop = ada.AudioLoop(
             video_mode="none", 
             on_audio_data=on_audio_data,
@@ -288,9 +295,11 @@ async def start_audio(sid, data=None):
 
             input_device_index=device_index,
             input_device_name=device_name,
+            output_device_name=output_device_name,
+            conversation_context_builder=conversation_context,
             kasa_agent=kasa_agent
         )
-        print("AudioLoop initialized successfully.")
+        print("[VOICE_LOOP] AudioLoop created")
 
         # Apply current permissions
         audio_loop.update_permissions(SETTINGS["tool_permissions"])
@@ -460,7 +469,8 @@ async def user_input(sid, data):
         print(f"[SERVER DEBUG] Sending message to model: '{text}'")
 
         captured = personal_memory.capture_explicit_memory(text)
-        relevant_memory = personal_memory.get_relevant_context(text)
+        memory_result = conversation_context.build_context(text, channel="text")
+        relevant_memory = memory_result["context"]
         model_input = text
         if captured:
             model_input = (
@@ -542,34 +552,34 @@ async def save_memory(sid, data):
 
 @sio.event
 async def upload_memory(sid, data):
-    print(f"Received memory upload request")
+    print("Received persistent memory import request")
     try:
         memory_text = data.get('memory', '')
         if not memory_text:
-            print("No memory data provided.")
+            await sio.emit('memory_import_result', {
+                'success': False,
+                'error': 'Memory file is empty.'
+            }, room=sid)
             return
 
-        if not audio_loop:
-             print("[SERVER DEBUG] [Error] Audio loop is None. Cannot load memory.")
-             await sio.emit('error', {'msg': "System not ready (Audio Loop inactive)"})
-             return
-        
-        if not audio_loop.session:
-             print("[SERVER DEBUG] [Error] Session is None. Cannot load memory.")
-             await sio.emit('error', {'msg': "System not ready (No active session)"})
-             return
+        result = personal_memory.import_memory_text(
+            memory_text,
+            source_name=data.get('source_name')
+        )
+        await sio.emit('memory_import_result', result, room=sid)
 
-        # Send to model
-        print("Sending memory context to model...")
-        context_msg = f"System Notification: The user has uploaded a long-term memory file. Please load the following context into your understanding. The format is a text log of previous conversations:\n\n{memory_text}"
-        
-        await audio_loop.session.send(input=context_msg, end_of_turn=True)
-        print("Memory context sent successfully.")
-        await sio.emit('status', {'msg': 'Memory Loaded into Context'})
-
+    except (TypeError, ValueError) as e:
+        print(f"Memory import rejected: {e}")
+        await sio.emit('memory_import_result', {
+            'success': False,
+            'error': str(e)
+        }, room=sid)
     except Exception as e:
         print(f"Error uploading memory: {e}")
-        await sio.emit('error', {'msg': f"Failed to upload memory: {str(e)}"})
+        await sio.emit('memory_import_result', {
+            'success': False,
+            'error': 'Memory import failed. Existing memory was preserved.'
+        }, room=sid)
 
 @sio.event
 async def discover_kasa(sid):

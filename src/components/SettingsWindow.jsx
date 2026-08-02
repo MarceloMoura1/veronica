@@ -38,6 +38,7 @@ const SettingsWindow = ({
 }) => {
     const [permissions, setPermissions] = useState({});
     const [faceAuthEnabled, setFaceAuthEnabled] = useState(false);
+    const [memoryImportResult, setMemoryImportResult] = useState(null);
 
     useEffect(() => {
         // Request initial permissions
@@ -54,13 +55,18 @@ const SettingsWindow = ({
                 }
             }
         };
+        const handleMemoryImportResult = (result) => {
+            setMemoryImportResult(result);
+        };
 
         socket.on('settings', handleSettings);
+        socket.on('memory_import_result', handleMemoryImportResult);
         // Also listen for legacy tool_permissions if needed, but 'settings' covers it
         // socket.on('tool_permissions', handlePermissions); 
 
         return () => {
             socket.off('settings', handleSettings);
+            socket.off('memory_import_result', handleMemoryImportResult);
         };
     }, [socket]);
 
@@ -228,6 +234,26 @@ const SettingsWindow = ({
                         onChange={handleFileUpload}
                         className="text-xs text-cyan-100 bg-gray-900 border border-cyan-800 rounded p-2 file:mr-2 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-[10px] file:font-semibold file:bg-cyan-900 file:text-cyan-400 hover:file:bg-cyan-800 cursor-pointer"
                     />
+                    {memoryImportResult && (
+                        <div className={`text-[10px] rounded border p-2 ${memoryImportResult.success
+                            ? 'text-emerald-300 border-emerald-800/60 bg-emerald-950/30'
+                            : 'text-red-300 border-red-800/60 bg-red-950/30'
+                        }`}>
+                            {memoryImportResult.success ? (
+                                <>
+                                    <div className="font-semibold mb-1">Memory imported successfully</div>
+                                    <div>Profile: {memoryImportResult.counts?.profile || 0}</div>
+                                    <div>Preferences: {memoryImportResult.counts?.preferences || 0}</div>
+                                    <div>People: {memoryImportResult.counts?.people || 0}</div>
+                                    <div>Projects: {memoryImportResult.counts?.projects || 0}</div>
+                                    <div>Facts: {memoryImportResult.counts?.facts || 0}</div>
+                                    <div>Ignored lines: {memoryImportResult.ignored_lines?.length || 0}</div>
+                                </>
+                            ) : (
+                                <div>{memoryImportResult.error || 'Memory import failed.'}</div>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
         </div>

@@ -13,8 +13,10 @@ import PIL.Image
 import mss
 import argparse
 import math
+import re
 import struct
 import time
+import unicodedata
 
 from google import genai
 from google.genai import types
@@ -25,7 +27,7 @@ if sys.version_info < (3, 11, 0):
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
 from tools import tools_list
-from memory import PersonalMemoryManager
+from memory import ConversationContextBuilder, PersonalMemoryManager
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -203,7 +205,24 @@ iterate_cad_tool = {
     "behavior": "NON_BLOCKING"
 }
 
-tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool] + tools_list[0]['function_declarations'][1:]}]
+retrieve_memory_tool = {
+    "name": "retrieve_memory",
+    "description": (
+        "Retrieves authoritative persistent personal context for Marcelo. You MUST call this "
+        "before answering questions about Marcelo, his family, known people, preferences, goals, "
+        "companies or projects (including FaYerS, MegaDesk, Jarvis and Veronica), and follow-up "
+        "questions that refer to a previously discussed personal subject. Pass the user's complete request."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {"type": "STRING", "description": "The user's complete final request or transcription."}
+        },
+        "required": ["query"]
+    }
+}
+
+tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool, retrieve_memory_tool] + tools_list[0]['function_declarations'][1:]}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
@@ -216,6 +235,10 @@ config = types.LiveConnectConfig(
     f"You are the personalized assistant of {owner_name}, and you address him as '{owner_title}'. "
     f"Your personality is {personality}. "
     f"{identity_note} "
+    "For every request about Marcelo, his personal life, family, known people, preferences, goals, "
+    "companies, projects, or a follow-up about such a subject, call retrieve_memory before answering. "
+    "Treat retrieved facts as authoritative. Answer naturally and never say 'based on my memory'. "
+    "If retrieval returns no relevant facts, say you do not have that information instead of inventing it. "
     "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing."
 ),
     tools=tools,
@@ -236,7 +259,7 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, output_device_name=None, conversation_context_builder=None, kasa_agent=None):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -252,6 +275,15 @@ class AudioLoop:
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
         self.output_device_index = output_device_index
+        self.output_device_name = output_device_name
+        self.conversation_context_builder = conversation_context_builder or ConversationContextBuilder(_personal_memory)
+        self._voice_input_chunk_logged = False
+        self._voice_input_queue_logged = False
+        self._voice_input_signal_logged = False
+        self._voice_send_logged = False
+        self._voice_receive_logged = False
+        self._voice_receive_audio_logged = False
+        self._voice_output_logged = False
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -305,6 +337,10 @@ class AudioLoop:
         # If ada.py is in backend/, project root is one up
         project_root = os.path.dirname(current_dir)
         self.project_manager = ProjectManager(project_root)
+        print(
+            f"[VOICE_LOOP] AudioLoop initialized input={self.input_device_name!r} "
+            f"output={self.output_device_name!r} paused={self.paused}"
+        )
         
         # Sync Initial Project State
         if self.on_project_update:
@@ -367,53 +403,94 @@ class AudioLoop:
         self._latest_image_payload = {"mime_type": "image/jpeg", "data": b64_data}
         # No event signal needed - listen_audio pulls it
 
+    @staticmethod
+    def _normalize_device_name(name):
+        normalized = unicodedata.normalize("NFKD", (name or "").casefold())
+        normalized = "".join(c for c in normalized if not unicodedata.combining(c))
+        return " ".join(re.findall(r"[a-z0-9]+", normalized))
+
+    def _resolve_audio_device(self, requested_name, is_input, rate):
+        direction = "input" if is_input else "output"
+        default_info = (
+            pya.get_default_input_device_info()
+            if is_input else pya.get_default_output_device_info()
+        )
+        default_index = int(default_info["index"])
+        requested = self._normalize_device_name(requested_name)
+        ignored_words = {
+            "microphone", "microfone", "speakers", "speaker", "headphones",
+            "headphone", "fones", "fone", "ouvido", "audio", "default",
+            "padrao", "communications", "comunicacoes",
+        }
+        requested_tokens = set(requested.split()) - ignored_words
+        candidates = []
+
+        print(
+            f"[VOICE_{direction.upper()}] resolving requested={requested_name!r} "
+            f"default={default_index}:{default_info.get('name')!r}"
+        )
+        for index in range(pya.get_device_count()):
+            try:
+                info = pya.get_device_info_by_index(index)
+                channels = info.get("maxInputChannels" if is_input else "maxOutputChannels", 0)
+                if channels < 1:
+                    continue
+                name = self._normalize_device_name(info.get("name", ""))
+                name_tokens = set(name.split()) - ignored_words
+                if requested:
+                    overlap = len(requested_tokens & name_tokens)
+                    if requested != name and requested not in name and name not in requested and overlap == 0:
+                        continue
+                if is_input:
+                    pya.is_format_supported(
+                        rate, input_device=index, input_channels=CHANNELS,
+                        input_format=FORMAT,
+                    )
+                else:
+                    pya.is_format_supported(
+                        rate, output_device=index, output_channels=CHANNELS,
+                        output_format=FORMAT,
+                    )
+                host_api = int(info.get("hostApi", -1))
+                score = (
+                    100 if index == default_index else 0,
+                    50 if requested and requested == name else 0,
+                    len(requested_tokens & name_tokens),
+                    {2: 4, 0: 3, 1: 2, 3: 1}.get(host_api, 0),
+                    -index,
+                )
+                candidates.append((score, index, info))
+            except (OSError, ValueError):
+                continue
+
+        if not candidates and requested:
+            print(f"[VOICE_{direction.upper()}] no compatible name match; falling back to default")
+            return self._resolve_audio_device(None, is_input, rate)
+        if not candidates:
+            raise RuntimeError(f"No {direction} device supports {rate} Hz mono PCM16")
+
+        _, index, info = max(candidates, key=lambda item: item[0])
+        host_name = pya.get_host_api_info_by_index(int(info.get("hostApi", 0))).get("name")
+        print(
+            f"[VOICE_{direction.upper()}] resolved index={index} "
+            f"name={info.get('name')!r} host={host_name!r} rate={rate}"
+        )
+        return index
+
     async def send_realtime(self):
         while True:
             msg = await self.out_queue.get()
             await self.session.send(input=msg, end_of_turn=False)
+            if not self._voice_send_logged and msg.get("mime_type") == "audio/pcm":
+                self._voice_send_logged = True
+                print(f"[VOICE_SEND] first audio chunk sent to Gemini bytes={len(msg['data'])}")
 
     async def listen_audio(self):
-        mic_info = pya.get_default_input_device_info()
-
-        # Resolve Input Device by Name if provided
-        resolved_input_device_index = None
-        
-        if self.input_device_name:
-            print(f"[ADA] Attempting to find input device matching: '{self.input_device_name}'")
-            count = pya.get_device_count()
-            best_match = None
-            
-            for i in range(count):
-                try:
-                    info = pya.get_device_info_by_index(i)
-                    if info['maxInputChannels'] > 0:
-                        name = info.get('name', '')
-                        # Simple case-insensitive check
-                        if self.input_device_name.lower() in name.lower() or name.lower() in self.input_device_name.lower():
-                             print(f"   Candidate {i}: {name}")
-                             # Prioritize exact match or very close match if possible, but first match is okay for now
-                             resolved_input_device_index = i
-                             best_match = name
-                             break
-                except Exception:
-                    continue
-            
-            if resolved_input_device_index is not None:
-                print(f"[ADA] Resolved input device '{self.input_device_name}' to index {resolved_input_device_index} ({best_match})")
-            else:
-                print(f"[ADA] Could not find device matching '{self.input_device_name}'. Checking index...")
-
-        # Fallback to index if Name lookup failed or wasn't provided
-        if resolved_input_device_index is None and self.input_device_index is not None:
-             try:
-                 resolved_input_device_index = int(self.input_device_index)
-                 print(f"[ADA] Requesting Input Device Index: {resolved_input_device_index}")
-             except ValueError:
-                 print(f"[ADA] Invalid device index '{self.input_device_index}', reverting to default.")
-                 resolved_input_device_index = None
-
-        if resolved_input_device_index is None:
-             print("[ADA] Using Default Input Device")
+        if self.input_device_index is not None:
+            print("[VOICE_INPUT] ignoring browser array index; PyAudio index spaces are unrelated")
+        resolved_input_device_index = self._resolve_audio_device(
+            self.input_device_name, is_input=True, rate=SEND_SAMPLE_RATE
+        )
 
         try:
             self.audio_stream = await asyncio.to_thread(
@@ -422,13 +499,13 @@ class AudioLoop:
                 channels=CHANNELS,
                 rate=SEND_SAMPLE_RATE,
                 input=True,
-                input_device_index=resolved_input_device_index if resolved_input_device_index is not None else mic_info["index"],
+                input_device_index=resolved_input_device_index,
                 frames_per_buffer=CHUNK_SIZE,
             )
         except OSError as e:
-            print(f"[ADA] [ERR] Failed to open audio input stream: {e}")
-            print("[ADA] [WARN] Audio features will be disabled. Please check microphone permissions.")
-            return
+            print(f"[VOICE_INPUT] failed to open index={resolved_input_device_index}: {e}")
+            raise
+        print(f"[VOICE_INPUT] opened index={resolved_input_device_index}")
 
         if __debug__:
             kwargs = {"exception_on_overflow": False}
@@ -446,14 +523,6 @@ class AudioLoop:
 
             try:
                 data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-                
-                # 1. Send Audio
-                if self.out_queue:
-                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
-                
-                # 2. VAD Logic for Video
-                # rms = audioop.rms(data, 2)
-                # Replacement for audioop.rms(data, 2)
                 count = len(data) // 2
                 if count > 0:
                     shorts = struct.unpack(f"<{count}h", data)
@@ -461,6 +530,18 @@ class AudioLoop:
                     rms = int(math.sqrt(sum_squares / count))
                 else:
                     rms = 0
+                if not self._voice_input_chunk_logged:
+                    self._voice_input_chunk_logged = True
+                    print(f"[VOICE_INPUT] first chunk received bytes={len(data)} rms={rms}")
+                if rms > 100 and not self._voice_input_signal_logged:
+                    self._voice_input_signal_logged = True
+                    print(f"[VOICE_INPUT] real signal detected rms={rms}")
+
+                if self.out_queue:
+                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+                    if not self._voice_input_queue_logged:
+                        print("[VOICE_INPUT] first chunk queued")
+                        self._voice_input_queue_logged = True
                 
                 if rms > VAD_THRESHOLD:
                     # Speech Detected
@@ -668,9 +749,15 @@ class AudioLoop:
             while True:
                 turn = self.session.receive()
                 async for response in turn:
+                    if not self._voice_receive_logged:
+                        self._voice_receive_logged = True
+                        print("[VOICE_RECEIVE] first response received from Gemini")
                     # 1. Handle Audio Data
                     if data := response.data:
                         self.audio_in_queue.put_nowait(data)
+                        if not self._voice_receive_audio_logged:
+                            self._voice_receive_audio_logged = True
+                            print(f"[VOICE_RECEIVE] first audio received bytes={len(data)}")
                         # NOTE: 'continue' removed here to allow processing transcription/tools in same packet
 
                     # 2. Handle Transcription (User & Model)
@@ -743,11 +830,11 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "retrieve_memory"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
-                                confirmation_required = self.permissions.get(fc.name, True)
+                                confirmation_required = False if fc.name == "retrieve_memory" else self.permissions.get(fc.name, True)
                                 
                                 if not confirmation_required:
                                     print(f"[ADA DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
@@ -803,7 +890,28 @@ class AudioLoop:
                                         continue
 
                                 # If confirmed (or no callback configured, or auto-allowed), proceed
-                                if fc.name == "generate_cad":
+                                if fc.name == "retrieve_memory":
+                                    query = fc.args.get("query", "")
+                                    memory_result = self.conversation_context_builder.build_context(
+                                        query, channel="voice"
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id,
+                                        name=fc.name,
+                                        response={
+                                            "context": memory_result["context"],
+                                            "entity": memory_result["entity"],
+                                            "intent": memory_result["intent"],
+                                            "item_count": memory_result["item_count"],
+                                            "instruction": (
+                                                "Answer naturally using these authoritative facts. "
+                                                "Do not mention memory retrieval. Do not invent absent facts."
+                                            ),
+                                        }
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "generate_cad":
                                     print(f"\n[ADA DEBUG] --------------------------------------------------")
                                     print(f"[ADA DEBUG] [TOOL] Tool Call Detected: 'generate_cad'")
                                     print(f"[ADA DEBUG] [IN] Arguments: prompt='{prompt}'")
@@ -1149,19 +1257,44 @@ class AudioLoop:
             raise e
 
     async def play_audio(self):
-        stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RECEIVE_SAMPLE_RATE,
-            output=True,
-            output_device_index=self.output_device_index,
-        )
-        while True:
-            bytestream = await self.audio_in_queue.get()
-            if self.on_audio_data:
-                self.on_audio_data(bytestream)
-            await asyncio.to_thread(stream.write, bytestream)
+        stream = None
+        try:
+            if self.output_device_index is not None:
+                print("[VOICE_OUTPUT] ignoring browser array index; PyAudio index spaces are unrelated")
+            resolved_output_device_index = self._resolve_audio_device(
+                self.output_device_name, is_input=False, rate=RECEIVE_SAMPLE_RATE
+            )
+            print(f"[VOICE_OUTPUT] opening index={resolved_output_device_index}")
+            stream = await asyncio.to_thread(
+                pya.open,
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RECEIVE_SAMPLE_RATE,
+                output=True,
+                output_device_index=resolved_output_device_index,
+            )
+            print(f"[VOICE_OUTPUT] output opened index={resolved_output_device_index}")
+            while True:
+                bytestream = await self.audio_in_queue.get()
+                if self.on_audio_data:
+                    self.on_audio_data(bytestream)
+                await asyncio.to_thread(stream.write, bytestream)
+                if not self._voice_output_logged:
+                    self._voice_output_logged = True
+                    print(f"[VOICE_OUTPUT] first chunk played bytes={len(bytestream)}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[VOICE_OUTPUT] playback failed: {type(exc).__name__}: {exc}")
+            if self.on_error:
+                self.on_error(f"Audio output failed: {exc}")
+            raise
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception as exc:
+                    print(f"[VOICE_OUTPUT] stream close failed: {exc}")
 
     async def get_frames(self):
         cap = await asyncio.to_thread(cv2.VideoCapture, 0, cv2.CAP_AVFOUNDATION)
@@ -1201,18 +1334,20 @@ class AudioLoop:
         
         while not self.stop_event.is_set():
             try:
-                print(f"[ADA DEBUG] [CONNECT] Connecting to Gemini Live API...")
+                print(f"[VOICE_LOOP] run started")
+                print(f"[VOICE_LIVE] connecting Gemini Live model={MODEL}")
                 async with (
                     client.aio.live.connect(model=MODEL, config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
+                    print("[VOICE_LIVE] connected")
 
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
 
-                    tg.create_task(self.send_realtime())
-                    tg.create_task(self.listen_audio())
+                    tg.create_task(self.send_realtime(), name="voice_send")
+                    tg.create_task(self.listen_audio(), name="voice_input")
                     # tg.create_task(self._process_video_queue()) # Removed in favor of VAD
 
                     if self.video_mode == "camera":
@@ -1220,8 +1355,8 @@ class AudioLoop:
                     elif self.video_mode == "screen":
                         tg.create_task(self.get_screen())
 
-                    tg.create_task(self.receive_audio())
-                    tg.create_task(self.play_audio())
+                    tg.create_task(self.receive_audio(), name="voice_receive")
+                    tg.create_task(self.play_audio(), name="voice_output")
 
                     # Handle Startup vs Reconnect Logic
                     if not is_reconnect:
@@ -1272,7 +1407,8 @@ class AudioLoop:
                 
             except Exception as e:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
-                print(f"[ADA DEBUG] [ERR] Connection Error: {e}")
+                print(f"[VOICE_LIVE] connection/task failure: {type(e).__name__}: {e}")
+                self._log_exception_tree(e)
                 
                 if self.stop_event.is_set():
                     break
@@ -1289,6 +1425,13 @@ class AudioLoop:
                         self.audio_stream.close()
                     except: 
                         pass
+
+    @classmethod
+    def _log_exception_tree(cls, error, depth=0):
+        indent = "  " * depth
+        print(f"[VOICE_TASK] {indent}{type(error).__name__}: {error}")
+        for nested in getattr(error, "exceptions", ()):
+            cls._log_exception_tree(nested, depth + 1)
 
 def get_input_devices():
     p = pyaudio.PyAudio()

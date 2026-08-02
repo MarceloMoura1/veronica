@@ -5,15 +5,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import threading
 import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 class PersonalMemoryManager:
     CATEGORIES = ("profile", "preferences", "people", "facts", "projects")
+    MAX_IMPORT_BYTES = 256 * 1024
 
     def __init__(self, storage_dir: str | Path | None = None):
         project_root = Path(__file__).resolve().parents[2]
@@ -108,11 +111,157 @@ class PersonalMemoryManager:
             print(f"[MEMORY] retrieved {name}")
         return value
 
+    def get_category(self, category: str) -> dict[str, Any]:
+        """Return a shallow snapshot for deterministic context construction."""
+        if category not in self.CATEGORIES:
+            raise ValueError(f"Unknown memory category: {category}")
+        with self._lock:
+            return dict(self._data[category])
+
+    def import_memory_text(self, text: str, source_name: str | None = None) -> dict[str, Any]:
+        """Parse and merge a human-editable Veronica Memory Pack V1."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Memory import is empty.")
+        if len(text.encode("utf-8")) > self.MAX_IMPORT_BYTES:
+            raise ValueError(f"Memory import exceeds the {self.MAX_IMPORT_BYTES}-byte limit.")
+
+        staged = {category: {} for category in self.CATEGORIES}
+        ignored = []
+        errors = []
+        section = None
+        entity_name = None
+
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            header = re.fullmatch(r"\[([A-Za-z]+)(?::([^\]]+))?\]", line)
+            if header:
+                section = header.group(1).casefold()
+                entity_name = header.group(2).strip() if header.group(2) else None
+                if section not in {"profile", "preferences", "facts", "person", "project"}:
+                    ignored.append({"line": line_number, "content": raw_line, "reason": "unknown section"})
+                    section = None
+                elif section in {"person", "project"} and entity_name == "":
+                    entity_name = None
+                continue
+
+            if section is None:
+                ignored.append({"line": line_number, "content": raw_line, "reason": "outside a supported section"})
+                continue
+
+            pair = re.fullmatch(r"([^=:]+?)\s*(?:=|:)\s*(.*)", line)
+            if not pair:
+                ignored.append({"line": line_number, "content": raw_line, "reason": "expected key = value"})
+                continue
+            key, value = pair.group(1).strip(), pair.group(2).strip()
+            if not key or not value:
+                ignored.append({"line": line_number, "content": raw_line, "reason": "empty key or value"})
+                continue
+
+            if section in {"profile", "preferences", "facts"}:
+                staged[section][key] = value
+                continue
+
+            category = "people" if section == "person" else "projects"
+            if entity_name:
+                staged[category].setdefault(entity_name, {})[key] = value
+            elif key.casefold() == "name":
+                entity_name = value
+                staged[category].setdefault(entity_name, {})
+            elif entity_name:
+                staged[category].setdefault(entity_name, {})[key] = value
+            else:
+                ignored.append({"line": line_number, "content": raw_line, "reason": f"{section} name must be declared first"})
+
+        counts = {
+            "profile": len(staged["profile"]),
+            "preferences": len(staged["preferences"]),
+            "people": len(staged["people"]),
+            "projects": len(staged["projects"]),
+            "facts": len(staged["facts"]),
+        }
+        if not any(counts.values()):
+            raise ValueError("No valid memory entries were found.")
+
+        changed_categories = set()
+        overwritten = []
+        with self._lock:
+            merged = {category: dict(values) for category, values in self._data.items()}
+            for category in ("profile", "preferences", "facts"):
+                for key, value in staged[category].items():
+                    existing_key = self._matching_key(merged[category], key)
+                    if existing_key and merged[category][existing_key] != value:
+                        overwritten.append(f"{category}.{existing_key}")
+                    target_key = existing_key or key
+                    if merged[category].get(target_key) != value:
+                        merged[category][target_key] = value
+                        changed_categories.add(category)
+
+            for category in ("people", "projects"):
+                for name, fields in staged[category].items():
+                    existing_name = self._matching_key(merged[category], name)
+                    target_name = existing_name or name
+                    current = merged[category].get(target_name, {})
+                    current = dict(current) if isinstance(current, dict) else {}
+                    for key, value in fields.items():
+                        existing_key = self._matching_key(current, key)
+                        target_key = existing_key or key
+                        if existing_key and current[existing_key] != value:
+                            overwritten.append(f"{category}.{target_name}.{existing_key}")
+                        if current.get(target_key) != value:
+                            current[target_key] = value
+                            changed_categories.add(category)
+                    merged[category][target_name] = current
+
+            backup_dir = None
+            has_existing_memory = any(self._data[category] for category in self.CATEGORIES)
+            if changed_categories and has_existing_memory:
+                backup_dir = self._create_backup()
+            for category in changed_categories:
+                self._data[category] = merged[category]
+                self._save(category)
+
+        safe_source = Path(str(source_name)).name[:255] if source_name else None
+        result = {
+            "success": True,
+            "source_name": safe_source,
+            "counts": counts,
+            "ignored_lines": ignored,
+            "errors": errors,
+            "overwritten": overwritten,
+            "backup_created": backup_dir is not None,
+            "changed_categories": sorted(changed_categories),
+        }
+        print(f"[MEMORY] imported pack {safe_source or '<unnamed>'}: {counts}")
+        return result
+
+    def _create_backup(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        backup_dir = self.storage_dir / "backups" / timestamp
+        backup_dir.mkdir(parents=True, exist_ok=False)
+        for category in self.CATEGORIES:
+            source = self._path(category)
+            if source.exists():
+                shutil.copy2(source, backup_dir / source.name)
+        print(f"[MEMORY] backup created {backup_dir}")
+        return backup_dir
+
     @staticmethod
     def _terms(text: str) -> set[str]:
+        text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
         normalized = unicodedata.normalize("NFKD", text.casefold())
         normalized = "".join(c for c in normalized if not unicodedata.combining(c))
-        return {term for term in re.findall(r"[a-z0-9_-]+", normalized) if len(term) > 1}
+        stopwords = {
+            "a", "as", "o", "os", "de", "da", "das", "do", "dos", "e", "em",
+            "na", "nas", "no", "nos", "um", "uma", "qual", "que", "me", "meu",
+            "minha", "the", "a", "an", "of", "to", "in", "is", "my", "what",
+        }
+        return {
+            term for term in re.findall(r"[a-z0-9]+", normalized)
+            if len(term) > 1 and term not in stopwords
+        }
 
     def search(self, query: str) -> list[dict[str, Any]]:
         query_terms = self._terms(query)

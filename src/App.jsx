@@ -45,7 +45,7 @@ function App() {
 
 
     const [isConnected, setIsConnected] = useState(true); // Power state DEFAULT ON
-    const [isMuted, setIsMuted] = useState(true); // Mic state DEFAULT MUTED
+    const [isMuted, setIsMuted] = useState(false); // Voice starts ready unless user explicitly mutes it
     const [isVideoOn, setIsVideoOn] = useState(false); // Video state
     const [messages, setMessages] = useState([]);
     const [inputValue, setInputValue] = useState('');
@@ -290,6 +290,15 @@ function App() {
 
     // Auto-Connect Model on Start (Only after Auth and devices loaded)
     useEffect(() => {
+        console.log('[VOICE_BOOT] state', {
+            isConnected,
+            isMuted,
+            isAuthenticated,
+            socketConnected,
+            micDevices: micDevices.length,
+            selectedMicId,
+            selectedSpeakerId
+        });
         // Only auto-connect once: when socket connected, authenticated, and devices loaded
         if (isConnected && isAuthenticated && socketConnected && micDevices.length > 0 && !hasAutoConnectedRef.current) {
             hasAutoConnectedRef.current = true;
@@ -303,17 +312,24 @@ function App() {
                 const index = micDevices.findIndex(d => d.deviceId === selectedMicId);
                 const queryDevice = micDevices.find(d => d.deviceId === selectedMicId);
                 const deviceName = queryDevice ? queryDevice.label : null;
-                console.log("Auto-connecting to model with device:", deviceName, "Index:", index);
+                const outputDevice = speakerDevices.find(d => d.deviceId === selectedSpeakerId);
+                const outputDeviceName = outputDevice ? outputDevice.label : null;
+                console.log('[VOICE_BOOT] emitting start_audio', {
+                    deviceName,
+                    outputDeviceName,
+                    browserIndex: index,
+                    muted: isMuted
+                });
 
                 setStatus('Connecting...');
                 socket.emit('start_audio', {
-                    device_index: index >= 0 ? index : null,
                     device_name: deviceName,
+                    output_device_name: outputDeviceName,
                     muted: isMuted
                 });
             }, 500);
         }
-    }, [isConnected, isAuthenticated, socketConnected, micDevices, selectedMicId]);
+    }, [isConnected, isMuted, isAuthenticated, socketConnected, micDevices, selectedMicId, speakerDevices, selectedSpeakerId]);
 
     useEffect(() => {
         // Socket IO Setup
@@ -551,6 +567,10 @@ function App() {
             setMicDevices(audioInputs);
             setSpeakerDevices(audioOutputs);
             setWebcamDevices(videoInputs);
+            console.log('[VOICE_BOOT] media devices enumerated', {
+                microphones: audioInputs.map(d => ({ id: d.deviceId, label: d.label })),
+                speakers: audioOutputs.map(d => ({ id: d.deviceId, label: d.label }))
+            });
 
             // Restore saved microphone or use first available
             const savedMicId = localStorage.getItem('selectedMicId');
@@ -1077,8 +1097,13 @@ function App() {
             setIsConnected(false);
             setIsMuted(false); // Reset mute state
         } else {
-            const index = micDevices.findIndex(d => d.deviceId === selectedMicId);
-            socket.emit('start_audio', { device_index: index >= 0 ? index : null });
+            const inputDevice = micDevices.find(d => d.deviceId === selectedMicId);
+            const outputDevice = speakerDevices.find(d => d.deviceId === selectedSpeakerId);
+            socket.emit('start_audio', {
+                device_name: inputDevice?.label || null,
+                output_device_name: outputDevice?.label || null,
+                muted: false
+            });
             setIsConnected(true);
             setIsMuted(false); // Start unmuted
         }
@@ -1132,13 +1157,23 @@ function App() {
         const file = e.target.files[0];
         if (!file) return;
 
+        const maxMemoryImportBytes = 256 * 1024;
+        if (file.size > maxMemoryImportBytes) {
+            addMessage('System', 'Memory file is too large (maximum 256 KiB).');
+            e.target.value = '';
+            return;
+        }
+
         const reader = new FileReader();
         reader.onload = (event) => {
             try {
                 const textContent = event.target.result;
                 // Just send the text content directly
                 if (typeof textContent === 'string' && textContent.length > 0) {
-                    socket.emit('upload_memory', { memory: textContent });
+                    socket.emit('upload_memory', {
+                        memory: textContent,
+                        source_name: file.name
+                    });
                     addMessage('System', 'Uploading memory...');
                 } else {
                     addMessage('System', 'Empty or invalid memory file');
@@ -1147,6 +1182,7 @@ function App() {
                 console.error("Error reading file:", err);
                 addMessage('System', 'Error reading memory file');
             }
+            e.target.value = '';
         };
         reader.readAsText(file);
     };
