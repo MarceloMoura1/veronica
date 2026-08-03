@@ -26,11 +26,30 @@ import ada
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
+from integrations import IntegrationManager
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
 app_socketio = socketio.ASGIApp(sio, app)
+
+
+async def emit_integration_registry(payload):
+    await sio.emit("integration_registry", payload)
+    for integration in payload.get("integrations", []):
+        integration_id = integration.get("id")
+        if not integration_id:
+            continue
+        await sio.emit(
+            "integration_realtime_update",
+            {
+                "details": integration_manager.get_details(integration_id),
+                "reports": integration_manager.get_reports(integration_id),
+            },
+        )
+
+
+integration_manager = IntegrationManager(event_callback=emit_integration_registry)
 
 import signal
 
@@ -127,6 +146,7 @@ async def startup_event():
 
     print("[SERVER] Startup: Initializing Kasa Agent...")
     await kasa_agent.initialize()
+    await integration_manager.test_connection("gemini")
 
 @app.get("/status")
 async def status():
@@ -136,6 +156,11 @@ async def status():
 async def connect(sid, environ):
     print(f"Client connected: {sid}")
     await sio.emit('status', {'msg': 'Connected to A.D.A Backend'}, room=sid)
+    await sio.emit(
+        "integration_registry",
+        {"integrations": integration_manager.list_integrations()},
+        room=sid,
+    )
 
     global authenticator
     
@@ -299,7 +324,8 @@ async def start_audio(sid, data=None):
             output_device_name=output_device_name,
             conversation_context_builder=conversation_context,
             conversational_memory_analyzer=conversational_memory,
-            kasa_agent=kasa_agent
+            kasa_agent=kasa_agent,
+            integration_manager=integration_manager,
         )
         print("[VOICE_LOOP] AudioLoop created")
 
@@ -1005,6 +1031,97 @@ async def update_tool_permissions(sid, data):
         audio_loop.update_permissions(SETTINGS["tool_permissions"])
     # Broadcast update to all
     await sio.emit('tool_permissions', SETTINGS["tool_permissions"])
+
+
+@sio.event
+async def get_integrations(sid):
+    await sio.emit(
+        "integration_registry",
+        {"integrations": integration_manager.list_integrations()},
+        room=sid,
+    )
+
+
+@sio.event
+async def get_integration_details(sid, data=None):
+    request = data or {}
+    try:
+        details = integration_manager.get_details(
+            request.get("integration_id", "gemini"),
+            period=request.get("period", "today"),
+            start_date=request.get("start_date"),
+            end_date=request.get("end_date"),
+        )
+        await sio.emit("integration_details", details, room=sid)
+    except (KeyError, ValueError) as error:
+        await sio.emit(
+            "integration_action_error",
+            {"message": str(error)[:300]},
+            room=sid,
+        )
+
+
+@sio.event
+async def refresh_integration_status(sid, data=None):
+    request = data or {}
+    try:
+        details = integration_manager.get_details(
+            request.get("integration_id", "gemini"),
+            period=request.get("period", "today"),
+            start_date=request.get("start_date"),
+            end_date=request.get("end_date"),
+        )
+        await sio.emit("integration_details", details, room=sid)
+    except (KeyError, ValueError) as error:
+        await sio.emit(
+            "integration_action_error",
+            {"message": str(error)[:300]},
+            room=sid,
+        )
+
+
+@sio.event
+async def get_integration_reports(sid, data=None):
+    request = data or {}
+    try:
+        payload = integration_manager.get_reports(
+            request.get("integration_id", "gemini"),
+            limit=request.get("limit", 20),
+        )
+        await sio.emit("integration_reports", payload, room=sid)
+    except (KeyError, ValueError) as error:
+        await sio.emit(
+            "integration_action_error",
+            {"message": str(error)[:300]},
+            room=sid,
+        )
+
+
+@sio.event
+async def test_integration_connection(sid, data=None):
+    request = data or {}
+    result = await integration_manager.test_connection(
+        request.get("integration_id", "gemini")
+    )
+    await sio.emit("integration_test_result", result, room=sid)
+
+
+@sio.event
+async def update_gemini_api_key(sid, data=None):
+    # The key is accepted only in this backend call and is never logged or echoed.
+    try:
+        await integration_manager.update_api_key((data or {}).get("api_key", ""))
+        await sio.emit(
+            "integration_key_result",
+            {"success": True, "configured": True, "restart_required_for_live": True},
+            room=sid,
+        )
+    except (OSError, ValueError) as error:
+        await sio.emit(
+            "integration_key_result",
+            {"success": False, "configured": False, "error": str(error)[:300]},
+            room=sid,
+        )
 
 if __name__ == "__main__":
     uvicorn.run(

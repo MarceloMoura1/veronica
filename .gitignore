@@ -38,3 +38,10 @@ Thumbs.db
 
 # Veronica runtime personal memory
 data/memory/
+
+# Runtime telemetry
+data/telemetry/
+
+# Local development logs
+.codex-*.log
+.phase*.log

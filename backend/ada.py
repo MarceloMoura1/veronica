@@ -225,7 +225,57 @@ retrieve_memory_tool = {
     }
 }
 
-tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool, retrieve_memory_tool] + tools_list[0]['function_declarations'][1:]}]
+get_integration_status_tool = {
+    "name": "get_integration_status",
+    "description": "Gets the current authoritative operational status and models for an integration such as Gemini.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "integration_id": {"type": "STRING", "description": "Integration id. Use gemini for Google Gemini."}
+        }
+    }
+}
+
+get_integration_usage_tool = {
+    "name": "get_integration_usage",
+    "description": "Gets authoritative token usage, request count and errors for an integration and time period.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "integration_id": {"type": "STRING", "description": "Integration id. Use gemini for Google Gemini."},
+            "period": {
+                "type": "STRING",
+                "description": "today, yesterday, last_7_days, this_month or custom."
+            },
+            "start_date": {"type": "STRING", "description": "YYYY-MM-DD, required for custom."},
+            "end_date": {"type": "STRING", "description": "YYYY-MM-DD, required for custom."}
+        }
+    }
+}
+
+get_integration_reports_tool = {
+    "name": "get_integration_reports",
+    "description": "Gets the authoritative recent errors, warnings and operational events for an integration.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "integration_id": {"type": "STRING", "description": "Integration id. Use gemini for Google Gemini."}
+        }
+    }
+}
+
+test_integration_connection_tool = {
+    "name": "test_integration_connection",
+    "description": "Runs a safe real connection check for Gemini without interrupting the active Live voice session.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "integration_id": {"type": "STRING", "description": "Integration id. Use gemini."}
+        }
+    }
+}
+
+tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool, retrieve_memory_tool, get_integration_status_tool, get_integration_usage_tool, get_integration_reports_tool, test_integration_connection_tool] + tools_list[0]['function_declarations'][1:]}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
@@ -264,7 +314,7 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, output_device_name=None, conversation_context_builder=None, conversational_memory_analyzer=None, kasa_agent=None):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, output_device_name=None, conversation_context_builder=None, conversational_memory_analyzer=None, kasa_agent=None, integration_manager=None):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -285,6 +335,8 @@ class AudioLoop:
         self.conversational_memory_analyzer = conversational_memory_analyzer or ConversationalMemoryAnalyzer(
             _personal_memory, self.conversation_context_builder
         )
+        self.integration_manager = integration_manager
+        self._pending_live_usage = None
         self._voice_input_chunk_logged = False
         self._voice_input_queue_logged = False
         self._voice_input_signal_logged = False
@@ -764,6 +816,8 @@ class AudioLoop:
                     if not self._voice_receive_logged:
                         self._voice_receive_logged = True
                         print("[VOICE_RECEIVE] first response received from Gemini")
+                    if response.usage_metadata is not None:
+                        self._pending_live_usage = response.usage_metadata
                     # 1. Handle Audio Data
                     if data := response.data:
                         self.audio_in_queue.put_nowait(data)
@@ -776,6 +830,13 @@ class AudioLoop:
                     if response.server_content:
                         if response.server_content.turn_complete:
                             voice_turn_complete = True
+                            if self.integration_manager and self._pending_live_usage is not None:
+                                self.integration_manager.record_usage(
+                                    self._pending_live_usage,
+                                    request_type="live",
+                                    model=MODEL,
+                                )
+                                self._pending_live_usage = None
                         if response.server_content.input_transcription:
                             transcript = response.server_content.input_transcription.text
                             if transcript:
@@ -846,11 +907,16 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "retrieve_memory"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "retrieve_memory", "get_integration_status", "get_integration_usage", "get_integration_reports", "test_integration_connection"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
                                 confirmation_required = False if fc.name == "retrieve_memory" else self.permissions.get(fc.name, True)
+                                if fc.name in {
+                                    "get_integration_status", "get_integration_usage", "get_integration_reports",
+                                    "test_integration_connection"
+                                }:
+                                    confirmation_required = False
                                 
                                 if not confirmation_required:
                                     print(f"[ADA DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
@@ -926,6 +992,52 @@ class AudioLoop:
                                         }
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "get_integration_status":
+                                    integration_id = fc.args.get("integration_id", "gemini")
+                                    result = (
+                                        self.integration_manager.tool_status(integration_id)
+                                        if self.integration_manager else {"error": "Integration Manager unavailable"}
+                                    )
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result}
+                                    ))
+
+                                elif fc.name == "get_integration_usage":
+                                    result = (
+                                        self.integration_manager.tool_usage(
+                                            integration_id=fc.args.get("integration_id", "gemini"),
+                                            period=fc.args.get("period", "today"),
+                                            start_date=fc.args.get("start_date"),
+                                            end_date=fc.args.get("end_date"),
+                                        )
+                                        if self.integration_manager else {"error": "Integration Manager unavailable"}
+                                    )
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result}
+                                    ))
+
+                                elif fc.name == "get_integration_reports":
+                                    result = (
+                                        self.integration_manager.get_reports(
+                                            fc.args.get("integration_id", "gemini")
+                                        )
+                                        if self.integration_manager else {"error": "Integration Manager unavailable"}
+                                    )
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result}
+                                    ))
+
+                                elif fc.name == "test_integration_connection":
+                                    result = (
+                                        await self.integration_manager.test_connection(
+                                            fc.args.get("integration_id", "gemini")
+                                        )
+                                        if self.integration_manager else {"error": "Integration Manager unavailable"}
+                                    )
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result}
+                                    ))
 
                                 elif fc.name == "generate_cad":
                                     print(f"\n[ADA DEBUG] --------------------------------------------------")
@@ -1385,6 +1497,8 @@ class AudioLoop:
                 ):
                     self.session = session
                     print("[VOICE_LIVE] connected")
+                    if self.integration_manager:
+                        await self.integration_manager.mark_live_connected()
 
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
@@ -1461,6 +1575,8 @@ class AudioLoop:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
                 print(f"[VOICE_LIVE] connection/task failure: {type(e).__name__}: {e}")
                 self._log_exception_tree(e)
+                if self.integration_manager:
+                    await self.integration_manager.mark_live_error(e)
                 
                 if self.stop_event.is_set():
                     break

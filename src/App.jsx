@@ -16,6 +16,8 @@ import KasaWindow from './components/KasaWindow';
 import PrinterWindow from './components/PrinterWindow';
 import SettingsWindow from './components/SettingsWindow';
 import Sidebar, { SectionPlaceholder } from './components/Sidebar';
+import IntegrationCenter from './components/IntegrationCenter';
+import IntegrationReports from './components/IntegrationReports';
 
 
 
@@ -1733,6 +1735,10 @@ function App() {
                     onDeny={handleDenyTool}
                 />
             </div>
+            ) : activeSection === 'integrations' ? (
+                <IntegrationCenter socket={socket} />
+            ) : activeSection === 'reports' ? (
+                <IntegrationReports socket={socket} />
             ) : (
                 <SectionPlaceholder section={activeSection} />
             )}
