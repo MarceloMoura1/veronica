@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 
 import pytest
 
@@ -13,6 +14,8 @@ importance = Muito alta
 [PERSON:Christyan]
 name = Christyan
 relationship = Melhor amigo e sócio
+[PERSON:Veronica]
+name = Verônica
 [PROJECT:MegaDesk]
 name = MegaDesk
 type = SaaS empresarial
@@ -272,10 +275,10 @@ def test_invalid_conversation_state_is_backed_up(tmp_path):
 
 def test_audio_loop_silently_preloads_cold_start_state():
     source = (Path(__file__).parents[1] / "backend" / "ada.py").read_text(encoding="utf-8")
-    assert "build_cold_start_context()" in source
-    assert "if not is_reconnect and not self._cold_start_context_sent:" in source
-    assert "self.session.send(input=restoration, end_of_turn=False)" in source
-    assert source.index("self.session.send(input=restoration") < source.index(
+    assert "await self._send_cold_start_once()" in source
+    assert "self.live_session.begin_cold_start()" in source
+    assert "await self.session.send(input=restoration, end_of_turn=False)" in source
+    assert source.index("await self._send_cold_start_once()") < source.index(
         'tg.create_task(self.listen_audio(), name="voice_input")'
     )
 
@@ -338,9 +341,53 @@ def test_explicit_topic_change_replaces_active_topic(memory_stack):
     assert state["active_topic"] == state["last_meaningful_topic"] == "MegaDesk"
 
 
-def test_live_session_resume_requires_retrieval_and_refreshes_after_greeting():
+def test_live_session_resume_requires_retrieval_without_refresh_after_greeting():
     source = (Path(__file__).parents[1] / "backend" / "ada.py").read_text(encoding="utf-8")
     assert "For any request to resume or recall the prior conversation, always call retrieve_memory" in source
     assert "Never claim there is no saved context without calling it" in source
-    assert 'learning_result.get("reason") == "greeting"' in source
-    assert "refreshing after greeting" in source
+    assert 'learning_result.get("reason") == "greeting"' not in source
+    assert "refreshing after greeting" not in source
+    assert source.count("await self._send_cold_start_once()") == 1
+
+
+def test_compact_cold_start_is_bounded_and_omits_raw_turn_section(memory_stack):
+    _, builder, analyzer, _ = memory_stack
+    analyzer.process_conversation_turn("Agora quero falar sobre MegaDesk.", "voice")
+    analyzer.process_conversation_turn(
+        "Amanhã quero revisar o cadastro de clientes do MegaDesk.", "voice"
+    )
+    context, diagnostics = analyzer.build_cold_start_context(
+        max_chars=800, include_diagnostics=True
+    )
+    assert len(context) <= 800
+    assert builder.current_subject["name"] == "MegaDesk"
+    assert '"subject":"MegaDesk"' in context
+    assert "Important recent turns" not in context
+    assert diagnostics["has_important_turns"] is False
+    assert diagnostics["after_chars"] < diagnostics["before_chars"]
+
+
+def test_compact_cold_start_excludes_superseded_decisions(memory_stack):
+    manager, _, analyzer, _ = memory_stack
+    manager.save_memory_record("decisions", "old", {
+        "id": "old", "decision": "old private choice", "project": "MegaDesk",
+        "status": "superseded", "timestamp": "2026-01-01T00:00:00+00:00",
+    })
+    manager.save_memory_record("decisions", "new", {
+        "id": "new", "decision": "current sanitized choice", "project": "MegaDesk",
+        "status": "active", "timestamp": "2026-01-02T00:00:00+00:00",
+    })
+    context = analyzer.build_cold_start_context(max_chars=800)
+    assert "current sanitized choice" in context
+    assert "old private choice" not in context
+
+
+def test_compact_cold_start_budget_keeps_valid_json(memory_stack):
+    _, _, analyzer, _ = memory_stack
+    context, diagnostics = analyzer.build_cold_start_context(
+        max_chars=240, include_diagnostics=True
+    )
+    payload = context.split("\n", 1)[1]
+    assert isinstance(json.loads(payload), dict)
+    assert len(context) <= 240
+    assert diagnostics["after_chars"] == len(context)

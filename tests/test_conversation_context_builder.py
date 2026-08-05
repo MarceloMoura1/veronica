@@ -78,6 +78,7 @@ megadesk_first_year_goal = No mínimo 100 clientes pagantes
 def builder(tmp_path):
     manager = PersonalMemoryManager(tmp_path)
     manager.import_memory_text(MEMORY_PACK)
+    manager.add_entity_alias("FaYerS", "Fires")
     return ConversationContextBuilder(manager)
 
 
@@ -167,6 +168,7 @@ def test_text_and_live_integrations_call_the_shared_builder():
     assert '"name": "retrieve_memory"' in ada_source
     assert 'query, channel="voice"' in ada_source
     assert 'confirmation_required = False if fc.name == "retrieve_memory"' in ada_source
+    assert "Relevant memory retrieval was already completed for this turn" in server_source
 
 
 def test_current_subject_never_scopes_global_memory(builder):
@@ -180,3 +182,76 @@ def test_current_subject_never_scopes_global_memory(builder):
         result = builder.build_context(query)
         assert result["entity"] == entity
         assert expected in result["context"]
+
+
+def test_greeting_uses_minimal_context_without_memory(builder):
+    result = builder.build_context("Olá Verônica, está me ouvindo?")
+    assert result["route"] == "minimal"
+    assert result["context"] == "" and result["item_count"] == 0
+    assert result["context_diagnostics"]["memory_mode"] == "none"
+    assert result["context_diagnostics"]["tools_mode"] == "none"
+
+
+def test_actionable_request_never_takes_greeting_fast_path(builder):
+    result = builder.build_context("Olá, ligue a luz do escritório")
+    assert result["route"] == "complex_task"
+    assert result["context_diagnostics"]["tools_mode"] == "full"
+
+
+def test_entity_lookup_is_directed_and_budgeted(builder):
+    result = builder.build_context("O que você sabe sobre o MegaDesk?")
+    assert result["route"] == "entity_lookup"
+    assert result["entity"] == "MegaDesk"
+    assert result["context_diagnostics"]["token_budget"] == 1600
+    assert result["context_diagnostics"]["components"][0]["estimated_tokens"] <= 1600
+
+
+def test_relational_query_keeps_multiple_global_entities(builder):
+    result = builder.build_context("Qual a relação entre MegaDesk e FaYerS?")
+    assert result["route"] == "relational"
+    assert set(result["entities"]) == {"MegaDesk", "FaYerS"}
+    assert "MegaDesk" in result["context"] and "FaYerS" in result["context"]
+
+
+def test_low_confidence_falls_back_to_complete_policy(builder):
+    result = builder.build_context("Explique torque em linguagem simples")
+    diagnostics = result["context_diagnostics"]
+    assert result["route"] == "complex_task"
+    assert diagnostics["confidence"] < .5
+    assert diagnostics["tools_mode"] == "full"
+
+
+def test_diagnostics_never_contain_query_or_memory_values(builder):
+    secret_query = "O que você sabe sobre MegaDesk?"
+    result = builder.build_context(secret_query)
+    diagnostics = str(result["context_diagnostics"])
+    assert secret_query not in diagnostics
+    assert "100 clientes pagantes" not in diagnostics
+
+
+def test_live_voice_retrieval_uses_the_same_context_policy(builder):
+    cases = (
+        ("Olá Verônica, está me ouvindo?", "minimal"),
+        ("O que você sabe sobre o MegaDesk?", "entity_lookup"),
+        ("Qual a relação entre MegaDesk e FaYerS?", "relational"),
+        ("Analise uma estratégia empresarial detalhada", "complex_task"),
+    )
+    for query, expected in cases:
+        result = builder.build_context(query, channel="voice")
+        assert result["route"] == expected
+    assert builder.build_context(cases[0][0], channel="voice")["context"] == ""
+
+
+def test_memory_diagnostic_log_does_not_print_query_or_entity(builder, capsys):
+    query = "O que você sabe sobre MegaDesk?"
+    builder.build_context(query, channel="voice")
+    captured = capsys.readouterr().out
+    assert query not in captured
+    assert "MegaDesk" not in captured
+
+
+def test_context_build_does_not_modify_memory_files(builder):
+    before = {path: path.read_bytes() for path in builder.memory.storage_dir.glob("*.json")}
+    builder.build_context("O que é o MegaDesk?")
+    after = {path: path.read_bytes() for path in builder.memory.storage_dir.glob("*.json")}
+    assert after == before

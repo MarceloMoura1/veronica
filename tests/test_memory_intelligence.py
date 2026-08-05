@@ -38,6 +38,9 @@ def stack(tmp_path):
     now = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
     manager = PersonalMemoryManager(tmp_path)
     manager.import_memory_text(PACK)
+    manager.add_entity_alias("FaYerS", "Fires")
+    manager.add_entity_alias("MegaDesk", "Mega Desk")
+    manager.add_entity_alias("Christyan", "Cristian")
     builder = ConversationContextBuilder(manager, max_context_chars=4000)
     analyzer = ConversationalMemoryAnalyzer(manager, builder, now_fn=lambda: now)
     builder.memory_intelligence.now_fn = lambda: now
@@ -158,6 +161,50 @@ def test_multi_entity_aliases(stack):
     _, builder, _, _, _ = stack
     entities = builder.resolver.resolve_entities("Compare Fires, Mega Desk e Cristian.")
     assert [item["name"] for item in entities] == ["FaYerS", "MegaDesk", "Christyan"]
+
+
+def test_entity_alias_survives_restart_and_resolves_to_canonical_name(stack):
+    _, _, _, _, path = stack
+    reloaded = PersonalMemoryManager(path)
+    resolver = EntityResolver(reloaded)
+    assert resolver.resolve_entity("Como está a Fires?") == {"name": "FaYerS", "category": "projects"}
+    assert resolver.resolve_entity("Como está a FaYerS?") == {"name": "FaYerS", "category": "projects"}
+
+
+def test_ambiguous_alias_is_rejected_and_not_resolved(stack):
+    manager, builder, _, _, _ = stack
+    with pytest.raises(ValueError, match="Ambiguous alias"):
+        manager.add_entity_alias("MegaDesk", "Fires")
+    manager._set("aliases", "MegaDesk", ["Fires"])
+    assert builder.resolver.resolve_entity("Fale sobre Fires") is None
+
+
+def test_alias_multi_entity_retrieval_is_canonical_and_private(stack):
+    manager, builder, _, _, _ = stack
+    result = builder.build_context("Compare Fires, Mega Desk e Cristian.")
+    assert result["entities"] == ["FaYerS", "MegaDesk", "Christyan"]
+    assert all(name in result["context"] for name in result["entities"])
+    assert all(item["category"] != "aliases" for item in manager.search("Fires"))
+    assert '"aliases"' not in result["context"]
+
+
+def test_persisted_relation_survives_alias_and_current_subject_changes(stack):
+    manager, builder, _, _, _ = stack
+    relation = manager.add_entity_relation(
+        "MegaDesk", "administers_business_operations_of", "FaYerS",
+        status="planned", summary="MegaDesk administrará a operação empresarial da FaYerS.",
+        source="explicit_user_statement", confidence=1.0, importance="high",
+    )
+    assert relation["changed"] is True
+
+    first = builder.build_context("Qual a relação entre MegaDesk e Fires?")
+    assert set(first["entities"]) == {"MegaDesk", "FaYerS"}
+    assert first["context"].count("MegaDesk administrará a operação empresarial da FaYerS.") == 1
+
+    builder.build_context("Quem é Pedro?")
+    second = builder.build_context("Qual a relação entre MegaDesk e FaYerS?")
+    assert set(second["entities"]) == {"MegaDesk", "FaYerS"}
+    assert second["context"].count("MegaDesk administrará a operação empresarial da FaYerS.") == 1
 
 
 def test_plural_reference_reuses_recent_entities(stack):

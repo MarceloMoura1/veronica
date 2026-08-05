@@ -29,6 +29,78 @@ VALID_STATUSES = {
 }
 
 
+class GeminiUsageNormalizer:
+    """Translate provider and legacy metadata without inventing values."""
+
+    FIELD_ALIASES = {
+        "input_tokens": ("prompt_token_count", "promptTokenCount"),
+        "visible_output_tokens": ("candidates_token_count", "candidatesTokenCount", "response_token_count", "responseTokenCount"),
+        "thinking_tokens": ("thoughts_token_count", "thoughtsTokenCount"),
+        "cached_tokens": ("cached_content_token_count", "cachedContentTokenCount"),
+        "tool_prompt_tokens": ("tool_use_prompt_token_count", "toolUsePromptTokenCount"),
+        "total_tokens": ("total_token_count", "totalTokenCount"),
+    }
+
+    DETAIL_ALIASES = {
+        "prompt_tokens_details": ("prompt_tokens_details", "promptTokensDetails"),
+        "cache_tokens_details": ("cache_tokens_details", "cacheTokensDetails"),
+        "output_tokens_details": (
+            "response_tokens_details", "responseTokensDetails",
+            "candidates_tokens_details", "candidatesTokensDetails",
+        ),
+        "tool_use_prompt_tokens_details": (
+            "tool_use_prompt_tokens_details", "toolUsePromptTokensDetails",
+        ),
+    }
+
+    @staticmethod
+    def _read(metadata: Any, aliases: tuple[str, ...]) -> int | None:
+        if metadata is None:
+            return None
+        for name in aliases:
+            raw = metadata.get(name) if isinstance(metadata, dict) else getattr(metadata, name, None)
+            if raw is not None:
+                return int(raw)
+        return None
+
+    @staticmethod
+    def _raw(metadata: Any, aliases: tuple[str, ...]) -> Any:
+        if metadata is None:
+            return None
+        for name in aliases:
+            if isinstance(metadata, dict):
+                if name in metadata:
+                    return metadata[name]
+            elif hasattr(metadata, name):
+                return getattr(metadata, name)
+        return None
+
+    @classmethod
+    def _details(cls, metadata: Any, aliases: tuple[str, ...]) -> list[dict[str, Any]] | None:
+        raw_details = cls._raw(metadata, aliases)
+        if raw_details is None:
+            return None
+        normalized = []
+        for detail in raw_details:
+            modality = cls._raw(detail, ("modality",))
+            token_count = cls._raw(detail, ("token_count", "tokenCount"))
+            if modality is not None:
+                modality = getattr(modality, "value", modality)
+                modality = str(modality).rsplit(".", 1)[-1]
+            normalized.append({
+                "modality": modality,
+                "token_count": int(token_count) if token_count is not None else None,
+            })
+        return normalized
+
+    @classmethod
+    def normalize(cls, metadata: Any) -> dict[str, Any]:
+        values = {field: cls._read(metadata, aliases) for field, aliases in cls.FIELD_ALIASES.items()}
+        values.update({field: cls._details(metadata, aliases) for field, aliases in cls.DETAIL_ALIASES.items()})
+        values["usage_metadata_available"] = metadata is not None
+        return values
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -99,34 +171,72 @@ class TelemetryStore:
         success: bool,
         latency_ms: int | None = None,
         usage_metadata: Any = None,
+        request_count: int = 1,
+        retry_count: int = 0,
+        diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        def value(name: str) -> int | None:
-            if usage_metadata is None:
-                return None
-            raw = (
-                usage_metadata.get(name)
-                if isinstance(usage_metadata, dict)
-                else getattr(usage_metadata, name, None)
-            )
-            return int(raw) if raw is not None else None
-
+        usage = GeminiUsageNormalizer.normalize(usage_metadata)
         record = {
             "timestamp": _now(),
             "integration_id": integration_id,
             "provider": provider,
             "model": model,
             "request_type": request_type,
-            "input_tokens": value("prompt_token_count"),
-            "output_tokens": value("response_token_count"),
-            "total_tokens": value("total_token_count"),
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["visible_output_tokens"],
+            "visible_output_tokens": usage["visible_output_tokens"],
+            "thinking_tokens": usage["thinking_tokens"],
+            "cached_tokens": usage["cached_tokens"],
+            "tool_prompt_tokens": usage["tool_prompt_tokens"],
+            "prompt_tokens_details": usage["prompt_tokens_details"],
+            "cache_tokens_details": usage["cache_tokens_details"],
+            "output_tokens_details": usage["output_tokens_details"],
+            "tool_use_prompt_tokens_details": usage["tool_use_prompt_tokens_details"],
+            "total_tokens": usage["total_tokens"],
+            "usage_metadata_available": usage["usage_metadata_available"],
+            "request_count": max(1, int(request_count)),
+            "retry_count": max(0, int(retry_count)),
             "latency_ms": latency_ms,
             "success": bool(success),
         }
+        if diagnostics:
+            record["diagnostics"] = self._sanitize_diagnostics(diagnostics)
         with self._lock:
             records = self._read()
             records.append(record)
             self._write(records)
         return record
+
+    @staticmethod
+    def _sanitize_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
+        """Keep quantitative operational fields and reject content-bearing values."""
+        allowed = {
+            "logical_session_id", "connection_id", "logical_session_new", "connection_new",
+            "reconnected", "resumption_requested", "resumption_accepted",
+            "resumption_handle_hash", "fallback_manual_used", "turn_index",
+            "connection_turn_index", "cold_start_send_count", "go_away_received",
+            "model", "function_tool_count", "google_search_present", "system_instruction_chars",
+            "tool_mode", "tool_mode_invalid", "external_tool_count", "internal_action_count",
+            "provider_tool_count", "tool_schema_hash",
+            "gateway", "canonical_action", "confirmation_required", "confirmation_outcome",
+            "tool_retry", "request_id_hash", "tool_payload_bytes", "tool_result_bytes",
+            "system_instruction_estimated_tokens", "tool_schema_chars",
+            "tool_schema_estimated_tokens", "cold_start_chars", "cold_start_estimated_tokens",
+            "cold_start_recent_reference_count", "cold_start_preserved_references",
+            "cold_start_has_summary", "cold_start_has_important_turns",
+            "cold_start_deduplicated_items", "cold_start_omitted_by_budget",
+            "manual_restoration_count", "compression_trigger_tokens",
+            "compression_target_tokens", "turn_coverage", "input_transcription_enabled",
+            "output_transcription_enabled", "audio_chunks_total", "audio_chunks_active",
+            "audio_chunks_inactive", "audio_duration_ms", "compression_inferred",
+            "context_policy_route", "retrieval_item_count", "retrieval_context_chars",
+            "retrieval_estimated_tokens",
+        }
+        result = {}
+        for key, value in diagnostics.items():
+            if key in allowed and isinstance(value, (str, int, float, bool, type(None))):
+                result[key] = value
+        return result
 
     @staticmethod
     def _parse(value: str) -> datetime:
@@ -171,14 +281,29 @@ class TelemetryStore:
         def total(field: str) -> int:
             return sum(item.get(field) or 0 for item in records)
 
+        def known(field: str) -> bool:
+            return any(item.get(field) is not None for item in records)
+
+        visible_output_total = sum(
+            item.get("visible_output_tokens")
+            if item.get("visible_output_tokens") is not None
+            else (item.get("output_tokens") or 0)
+            for item in records
+        )
+
         return {
             "period": period,
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
             "input_tokens": total("input_tokens"),
             "output_tokens": total("output_tokens"),
+            "visible_output_tokens": visible_output_total,
+            "thinking_tokens": total("thinking_tokens") if known("thinking_tokens") else None,
+            "cached_tokens": total("cached_tokens") if known("cached_tokens") else None,
+            "tool_prompt_tokens": total("tool_prompt_tokens") if known("tool_prompt_tokens") else None,
             "total_tokens": total("total_tokens"),
-            "requests": len(records),
+            "requests": sum(item.get("request_count", 1) for item in records),
+            "retries": total("retry_count"),
             "errors": sum(1 for item in records if not item.get("success")),
             "estimated_cost": None,
             "cost_status": "not_configured",
@@ -433,6 +558,8 @@ class IntegrationManager:
         model: str | None = None,
         success: bool = True,
         latency_ms: int | None = None,
+        retry_count: int = 0,
+        diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         state = self._states[integration_id]
         record = self.telemetry.record(
@@ -443,6 +570,8 @@ class IntegrationManager:
             success=success,
             latency_ms=latency_ms,
             usage_metadata=usage_metadata,
+            retry_count=retry_count,
+            diagnostics=diagnostics,
         )
         self._record_event(
             integration_id,

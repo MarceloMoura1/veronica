@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -17,9 +18,11 @@ from typing import Any
 class PersonalMemoryManager:
     CATEGORIES = (
         "profile", "preferences", "people", "facts", "projects",
-        "events", "decisions", "plans", "continuity",
+        "events", "decisions", "plans", "continuity", "aliases", "relations",
     )
     MAX_IMPORT_BYTES = 256 * 1024
+    MAX_BACKUPS = 20
+    RELATION_STATUSES = {"planned", "active", "tentative", "completed", "cancelled"}
 
     def __init__(self, storage_dir: str | Path | None = None):
         project_root = Path(__file__).resolve().parents[2]
@@ -34,7 +37,8 @@ class PersonalMemoryManager:
     def _load(self, category: str) -> dict[str, Any]:
         path = self._path(category)
         if not path.exists():
-            self._atomic_write(path, {})
+            if category not in {"aliases", "relations"}:
+                self._atomic_write(path, {})
             return {}
         try:
             with path.open("r", encoding="utf-8") as handle:
@@ -111,7 +115,7 @@ class PersonalMemoryManager:
     def get_project(self, name: str) -> dict[str, Any] | None:
         value = self._get("projects", name)
         if value is not None:
-            print(f"[MEMORY] retrieved {name}")
+            print("[MEMORY] project retrieved")
         return value
 
     def get_category(self, category: str) -> dict[str, Any]:
@@ -120,6 +124,143 @@ class PersonalMemoryManager:
             raise ValueError(f"Unknown memory category: {category}")
         with self._lock:
             return dict(self._data[category])
+
+    def _entity_catalog(self) -> list[dict[str, str]]:
+        catalog = []
+        for category in ("projects", "people"):
+            for key, value in self._data[category].items():
+                names = {str(key)}
+                if isinstance(value, dict):
+                    names.update(str(value.get(field, "")) for field in ("name", "canonical_name"))
+                catalog.append({"name": str(key), "category": category, "identities": names})
+        profile_name = self._data["profile"].get("name")
+        if profile_name:
+            catalog.append({"name": str(profile_name), "category": "profile", "identities": {str(profile_name)}})
+        return catalog
+
+    def _resolve_canonical_entity(self, value: str) -> dict[str, str]:
+        from .entity_resolver import normalize_text
+        normalized = normalize_text(str(value or ""))
+        if not normalized:
+            raise ValueError("Canonical entity must contain letters or numbers.")
+        matches = [
+            {"name": item["name"], "category": item["category"]}
+            for item in self._entity_catalog()
+            if any(normalize_text(identity) == normalized for identity in item["identities"] if identity)
+        ]
+        unique = {(item["name"], item["category"]): item for item in matches}
+        if not unique:
+            raise ValueError(f"Unknown canonical entity: {value}")
+        if len(unique) > 1:
+            raise ValueError("Canonical entity is ambiguous after normalization.")
+        return next(iter(unique.values()))
+
+    def _transactional_category_write(self, category: str, updated: dict[str, Any]) -> str:
+        previous = self._data[category]
+        backup_dir = self._create_backup()
+        self._data[category] = updated
+        try:
+            self._save(category)
+        except Exception:
+            self._data[category] = previous
+            raise
+        self._prune_backups()
+        return backup_dir.name
+
+    def add_entity_alias(self, canonical_name: str, alias: str) -> dict[str, Any]:
+        """Persist an alias for a known person or project without exposing memory data."""
+        canonical_name = str(canonical_name or "").strip()
+        alias = str(alias or "").strip()
+        if not canonical_name or not alias:
+            raise ValueError("Canonical name and alias are required.")
+        from .entity_resolver import normalize_text
+        entity = self._resolve_canonical_entity(canonical_name)
+        canonical, category = entity["name"], entity["category"]
+        normalized_alias = normalize_text(alias)
+        if not normalized_alias:
+            raise ValueError("Alias must contain letters or numbers.")
+
+        with self._lock:
+            canonical_owners = {
+                item["name"] for item in self._entity_catalog()
+                if any(normalize_text(identity) == normalized_alias for identity in item["identities"] if identity)
+            }
+            if canonical_owners == {canonical}:
+                return {"canonical_name": canonical, "category": category, "alias": alias,
+                        "changed": False, "backup_id": None}
+            if canonical_owners:
+                raise ValueError("Alias conflicts with another canonical entity.")
+
+            alias_owners = {
+                owner for owner, aliases in self._data["aliases"].items()
+                if isinstance(aliases, list)
+                and any(normalize_text(str(item)) == normalized_alias for item in aliases)
+            }
+            if alias_owners - {canonical} or len(alias_owners) > 1:
+                raise ValueError("Ambiguous alias or alias already belongs to another entity.")
+            aliases = list(self._data["aliases"].get(canonical, []))
+            if any(normalize_text(str(item)) == normalized_alias for item in aliases):
+                return {"canonical_name": canonical, "category": category, "alias": alias,
+                        "changed": False, "backup_id": None}
+            aliases.append(alias)
+            updated = dict(self._data["aliases"])
+            updated[canonical] = aliases
+            backup_id = self._transactional_category_write("aliases", updated)
+        return {"canonical_name": canonical, "category": category, "alias": alias,
+                "changed": True, "backup_id": backup_id}
+
+    def add_entity_relation(
+        self, source_entity: str, relation_type: str, target_entity: str, *,
+        status: str, summary: str, source: str,
+        confidence: float = 1.0, importance: str = "high",
+    ) -> dict[str, Any]:
+        """Persist a validated directional relation between two canonical entities."""
+        source_item = self._resolve_canonical_entity(source_entity)
+        target_item = self._resolve_canonical_entity(target_entity)
+        if source_item == target_item:
+            raise ValueError("Self-relations are not allowed.")
+        relation_type = str(relation_type or "").strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", relation_type):
+            raise ValueError("Relation type must be a lowercase snake_case identifier.")
+        status = str(status or "").strip().casefold()
+        if status not in self.RELATION_STATUSES:
+            raise ValueError("Unsupported relation status.")
+        summary = str(summary or "").strip()
+        source = str(source or "").strip()
+        importance = str(importance or "").strip().casefold()
+        if not summary or not source:
+            raise ValueError("Relation summary and source are required.")
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Relation confidence must be numeric.") from exc
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("Relation confidence must be between 0 and 1.")
+
+        identity = "|".join((source_item["name"], relation_type, target_item["name"]))
+        relation_id = f"relation_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+        comparable = {
+            "source_entity": source_item["name"], "source_category": source_item["category"],
+            "relation_type": relation_type,
+            "target_entity": target_item["name"], "target_category": target_item["category"],
+            "entities": [source_item["name"], target_item["name"]],
+            "status": status, "summary": summary, "source": source,
+            "confidence": confidence, "importance": importance,
+            "relationships": [{"type": relation_type, "entity": target_item["name"]}],
+        }
+        with self._lock:
+            existing = self._data["relations"].get(relation_id)
+            if existing:
+                existing_comparable = {key: existing.get(key) for key in comparable}
+                if existing_comparable == comparable:
+                    return {"relation_id": relation_id, "changed": False, "backup_id": None}
+                raise ValueError("Conflicting relation already exists.")
+            now = datetime.now(timezone.utc).isoformat()
+            record = {"id": relation_id, **comparable, "recorded_at": now, "updated_at": now}
+            updated = dict(self._data["relations"])
+            updated[relation_id] = record
+            backup_id = self._transactional_category_write("relations", updated)
+        return {"relation_id": relation_id, "changed": True, "backup_id": backup_id}
 
     def save_memory_record(self, category: str, memory_id: str, record: dict[str, Any]) -> None:
         if category not in {"events", "decisions", "plans"}:
@@ -280,6 +421,8 @@ class PersonalMemoryManager:
             for category in changed_categories:
                 self._data[category] = merged[category]
                 self._save(category)
+            if backup_dir is not None:
+                self._prune_backups()
 
         safe_source = Path(str(source_name)).name[:255] if source_name else None
         result = {
@@ -303,8 +446,17 @@ class PersonalMemoryManager:
             source = self._path(category)
             if source.exists():
                 shutil.copy2(source, backup_dir / source.name)
-        print(f"[MEMORY] backup created {backup_dir}")
+        print(f"[MEMORY] backup created id={backup_dir.name}")
         return backup_dir
+
+    def _prune_backups(self) -> None:
+        backup_root = self.storage_dir / "backups"
+        if not backup_root.exists():
+            return
+        backups = sorted((path for path in backup_root.iterdir() if path.is_dir()), reverse=True)
+        for expired in backups[self.MAX_BACKUPS :]:
+            if expired.resolve().parent == backup_root.resolve():
+                shutil.rmtree(expired)
 
     @staticmethod
     def _terms(text: str) -> set[str]:
@@ -325,7 +477,7 @@ class PersonalMemoryManager:
         query_terms = self._terms(query)
         results = []
         for category, items in self._data.items():
-            if category in {"events", "decisions", "plans", "continuity"}:
+            if category in {"events", "decisions", "plans", "continuity", "aliases"}:
                 continue
             for key, value in items.items():
                 terms = self._terms(f"{key} {json.dumps(value, ensure_ascii=False)}")
@@ -353,7 +505,7 @@ class PersonalMemoryManager:
         for item in results:
             value = json.dumps(item["value"], ensure_ascii=False) if isinstance(item["value"], (dict, list)) else str(item["value"])
             lines.append(f"- {item['category']}.{item['key']}: {value}")
-            print(f"[MEMORY] retrieved {item['category']}.{item['key']}")
+            print(f"[MEMORY] retrieved category={item['category']}")
         return "\n".join(lines)
 
     def search_global(self, query, entities=None, intent=None, time_filter=None, max_items=16):

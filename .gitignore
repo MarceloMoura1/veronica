@@ -45,3 +45,6 @@ data/telemetry/
 # Local development logs
 .codex-*.log
 .phase*.log
+
+# Local runtime settings
+settings.json

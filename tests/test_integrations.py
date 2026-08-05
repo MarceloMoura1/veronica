@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from types import SimpleNamespace
 
 from integrations import IntegrationEventStore, IntegrationManager, IntegrationState, TelemetryStore
@@ -173,3 +174,128 @@ def test_details_and_tools_use_the_same_integration_telemetry(tmp_path):
     )
     assert integration_manager.tool_usage("gemini") == integration_manager.get_details("gemini")["usage"]
     assert integration_manager.get_status("gemini")["metadata"]["sdk_name"] == "google-genai"
+
+
+def test_candidates_are_visible_and_thoughts_are_separate(tmp_path):
+    record = TelemetryStore(tmp_path / "usage.json").record(
+        model="m", request_type="live", success=True,
+        usage_metadata={
+            "prompt_token_count": 20, "candidates_token_count": 7,
+            "thoughts_token_count": 11, "total_token_count": 38,
+        },
+    )
+    assert record["visible_output_tokens"] == record["output_tokens"] == 7
+    assert record["thinking_tokens"] == 11
+    assert record["total_tokens"] == 38
+
+
+def test_provider_total_is_preserved_when_components_differ(tmp_path):
+    record = TelemetryStore(tmp_path / "usage.json").record(
+        model="m", request_type="live", success=True,
+        usage_metadata={"prompt_token_count": 10, "candidates_token_count": 2, "total_token_count": 19},
+    )
+    assert record["total_tokens"] == 19
+    assert record["thinking_tokens"] is None
+
+
+def test_camel_case_metadata_and_cache_tools_are_supported(tmp_path):
+    record = TelemetryStore(tmp_path / "usage.json").record(
+        model="m", request_type="live", success=True,
+        usage_metadata={
+            "promptTokenCount": 10, "candidatesTokenCount": 2,
+            "cachedContentTokenCount": 4, "toolUsePromptTokenCount": 3,
+            "totalTokenCount": 19,
+        },
+    )
+    assert (record["cached_tokens"], record["tool_prompt_tokens"]) == (4, 3)
+
+
+def test_retry_is_counted_and_metadata_absence_remains_explicit(tmp_path):
+    store = TelemetryStore(tmp_path / "usage.json")
+    record = store.record(
+        model="m", request_type="live_reconnect", success=False,
+        usage_metadata=None, retry_count=1,
+    )
+    summary = store.query()
+    assert record["usage_metadata_available"] is False
+    assert record["thinking_tokens"] is None
+    assert summary["requests"] == 1 and summary["retries"] == 1
+
+
+def test_old_events_without_new_fields_remain_readable(tmp_path):
+    store = TelemetryStore(tmp_path / "usage.json")
+    store._write([{
+        "timestamp": datetime.now(timezone.utc).isoformat(), "provider": "Google",
+        "model": "old", "request_type": "live", "input_tokens": 5,
+        "output_tokens": 3, "total_tokens": 8, "success": True,
+    }])
+    summary = store.query()
+    assert summary["visible_output_tokens"] == 3
+    assert summary["thinking_tokens"] is None
+
+
+class FakeMediaModality(Enum):
+    TEXT = "TEXT"
+    AUDIO = "AUDIO"
+
+
+def test_live_response_token_details_are_normalized(tmp_path):
+    record = TelemetryStore(tmp_path / "usage.json").record(
+        model="live", request_type="live", success=True,
+        usage_metadata=SimpleNamespace(response_tokens_details=[
+            SimpleNamespace(modality=FakeMediaModality.AUDIO, token_count=12),
+            SimpleNamespace(modality="TEXT", token_count=3),
+        ], total_token_count=29),
+    )
+    assert record["output_tokens_details"] == [
+        {"modality": "AUDIO", "token_count": 12},
+        {"modality": "TEXT", "token_count": 3},
+    ]
+    assert record["total_tokens"] == 29
+
+
+def test_non_live_candidate_token_details_are_normalized(tmp_path):
+    record = TelemetryStore(tmp_path / "usage.json").record(
+        model="text", request_type="text", success=True,
+        usage_metadata={"candidatesTokensDetails": [
+            {"modality": "MediaModality.TEXT", "tokenCount": 7},
+        ]},
+    )
+    assert record["output_tokens_details"] == [{"modality": "TEXT", "token_count": 7}]
+
+
+def test_input_cache_and_tool_modalities_are_normalized_without_inventing_values(tmp_path):
+    record = TelemetryStore(tmp_path / "usage.json").record(
+        model="m", request_type="text", success=True,
+        usage_metadata={
+            "prompt_tokens_details": [{"modality": FakeMediaModality.TEXT, "token_count": 8}],
+            "cacheTokensDetails": [{"modality": "AUDIO", "tokenCount": 2}],
+            "tool_use_prompt_tokens_details": [SimpleNamespace(modality="TEXT", token_count=1)],
+            "total_token_count": 17,
+        },
+    )
+    assert record["prompt_tokens_details"] == [{"modality": "TEXT", "token_count": 8}]
+    assert record["cache_tokens_details"] == [{"modality": "AUDIO", "token_count": 2}]
+    assert record["tool_use_prompt_tokens_details"] == [{"modality": "TEXT", "token_count": 1}]
+    assert record["output_tokens_details"] is None
+    assert record["visible_output_tokens"] is None
+    assert record["total_tokens"] == 17
+
+
+def test_telemetry_diagnostics_are_sanitized(tmp_path):
+    store = TelemetryStore(tmp_path / "usage.json")
+    record = store.record(
+        model="live-model", request_type="live", success=True,
+        diagnostics={
+            "logical_session_id": "random-id", "turn_index": 2,
+            "resumption_handle_hash": "abc123",
+            "resumption_handle": "must-not-be-stored", "transcript": "private content",
+        },
+    )
+    assert record["diagnostics"] == {
+        "logical_session_id": "random-id", "turn_index": 2,
+        "resumption_handle_hash": "abc123",
+    }
+    persisted = (tmp_path / "usage.json").read_text(encoding="utf-8")
+    assert "private content" not in persisted
+    assert "must-not-be-stored" not in persisted

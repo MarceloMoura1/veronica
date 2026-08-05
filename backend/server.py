@@ -509,7 +509,11 @@ async def user_input(sid, data):
                 f"User message: {text}"
             )
         elif relevant_memory:
-            model_input = f"System Notification:\n{relevant_memory}\n\nUser message: {text}"
+            model_input = (
+                "System Notification: Relevant memory retrieval was already completed for this turn. "
+                "Do not call retrieve_memory again for this request.\n"
+                f"{relevant_memory}\n\nUser message: {text}"
+            )
         
         # Log User Input to Project History
         if audio_loop and audio_loop.project_manager:

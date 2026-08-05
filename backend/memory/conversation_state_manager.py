@@ -119,3 +119,84 @@ class ConversationStateManager:
         for item in state["important_turns"][-8:]:
             lines.append(f"- {'Marcelo' if item['role']=='user' else 'Veronica'}: {item['text']}")
         return "\n".join(lines)[:max_chars]
+
+    def build_compact_restoration_context(self, memory_manager, max_chars=1200):
+        """Build a bounded cold start from complete, deduplicated records."""
+        if max_chars < 240:
+            raise ValueError("Cold Start budget must be at least 240 characters")
+        state = self.snapshot()
+        subject = state.get("last_meaningful_topic") or state.get("active_topic")
+        entities = []
+        for name in [subject, *state.get("active_entities", [])]:
+            if name and name not in entities:
+                entities.append(name)
+
+        payload = {
+            "subject": subject,
+            "entities": entities[:6],
+            "summary": (state.get("conversation_summary") or "").strip() or None,
+            "memory_refs": [],
+        }
+        prefix = "Session state (silent; retrieve details on demand):"
+        omitted = 0
+        initial_text = prefix + "\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(initial_text) > max_chars and payload["summary"]:
+            payload["summary"] = None
+            omitted += 1
+        candidates = []
+        referenced = {item.get("id") for item in state.get("recent_memory_refs", []) if item.get("id")}
+        for record in memory_manager.get_active_decisions(limit=6):
+            candidates.append(("decision", record))
+        for record in memory_manager.get_active_plans(limit=6):
+            candidates.append(("plan", record))
+        for record in memory_manager.get_recent_memories(limit=20):
+            if record.get("id") in referenced:
+                candidates.append((record.get("memory_type") or "memory", record))
+
+        seen, deduplicated = set(), 0
+        for category, record in candidates:
+            record_id = record.get("id")
+            key = record_id or json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+            if key in seen:
+                deduplicated += 1
+                continue
+            seen.add(key)
+            compact = {
+                key: value for key, value in {
+                    "id": record_id,
+                    "type": category,
+                    "entity": record.get("project") or record.get("entity"),
+                    "summary": record.get("decision") or record.get("plan") or record.get("summary"),
+                    "status": record.get("status"),
+                    "when": record.get("target_date") or record.get("timestamp"),
+                }.items() if value not in (None, "", [], {})
+            }
+            proposed = {**payload, "memory_refs": [*payload["memory_refs"], compact]}
+            text = prefix + "\n" + json.dumps(proposed, ensure_ascii=False, separators=(",", ":"))
+            if len(text) > max_chars:
+                omitted += 1
+                continue
+            payload = proposed
+
+        payload = {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+        text = prefix + "\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(text) > max_chars and "summary" in payload:
+            payload.pop("summary")
+            omitted += 1
+            text = prefix + "\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        while len(text) > max_chars and len(payload.get("entities", [])) > 1:
+            payload["entities"].pop()
+            omitted += 1
+            text = prefix + "\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        diagnostics = {
+            "before_chars": len(self.build_restoration_context(memory_manager)),
+            "after_chars": len(text),
+            "estimated_tokens": (len(text) + 3) // 4,
+            "deduplicated_items": deduplicated,
+            "omitted_by_budget": omitted,
+            "preserved_references": len(payload.get("memory_refs", [])),
+            "has_summary": "summary" in payload,
+            "has_important_turns": False,
+            "recent_reference_count": len(referenced),
+        }
+        return text, diagnostics

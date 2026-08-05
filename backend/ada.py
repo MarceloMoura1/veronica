@@ -5,6 +5,7 @@ import os
 import sys
 import traceback
 import json
+import hashlib
 from pathlib import Path
 from dotenv import load_dotenv
 import cv2
@@ -13,6 +14,7 @@ import PIL.Image
 import mss
 import argparse
 import math
+from types import SimpleNamespace
 import re
 import struct
 import time
@@ -28,6 +30,12 @@ if sys.version_info < (3, 11, 0):
 
 from tools import tools_list
 from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
+from live_session import LiveSessionState, compression_limits
+from live_tools import (
+    GATEWAY_MODE, ToolRoutingError, build_action_registry,
+    build_gateway_declarations, resolve_tool_mode, route_gateway_call,
+    safe_routing_error, schema_metrics,
+)
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -225,6 +233,41 @@ retrieve_memory_tool = {
     }
 }
 
+add_entity_alias_tool = {
+    "name": "add_entity_alias",
+    "description": "Adds a persistent alias to a known person or project after user confirmation.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "canonical_name": {"type": "STRING", "description": "Existing canonical person or project name."},
+            "alias": {"type": "STRING", "description": "Alias to associate with the canonical entity."},
+        },
+        "required": ["canonical_name", "alias"],
+    },
+}
+
+add_entity_relation_tool = {
+    "name": "add_entity_relation",
+    "description": "Adds a persistent validated relation between two known entities after user confirmation.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "source_entity": {"type": "STRING"},
+            "relation_type": {"type": "STRING"},
+            "target_entity": {"type": "STRING"},
+            "status": {"type": "STRING"},
+            "summary": {"type": "STRING"},
+            "source": {"type": "STRING"},
+            "confidence": {"type": "NUMBER"},
+            "importance": {"type": "STRING"},
+        },
+        "required": [
+            "source_entity", "relation_type", "target_entity", "status",
+            "summary", "source", "confidence", "importance",
+        ],
+    },
+}
+
 get_integration_status_tool = {
     "name": "get_integration_status",
     "description": "Gets the current authoritative operational status and models for an integration such as Gemini.",
@@ -275,36 +318,149 @@ test_integration_connection_tool = {
     }
 }
 
-tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool, retrieve_memory_tool, get_integration_status_tool, get_integration_usage_tool, get_integration_reports_tool, test_integration_connection_tool] + tools_list[0]['function_declarations'][1:]}]
+TOOL_HINTS = {
+    "generate_cad": "Create a 3D CAD model.",
+    "run_web_agent": "Use browser.",
+    "create_project": "Create a project folder.",
+    "switch_project": "Change the active project.",
+    "list_projects": "List projects.",
+    "list_smart_devices": "List smart devices.",
+    "control_light": "Control a smart light.",
+    "discover_printers": "Find 3D printers.",
+    "print_stl": "Print an STL file.",
+    "get_print_status": "Get 3D printer status.",
+    "iterate_cad": "Modify the current CAD design.",
+    "retrieve_memory": "Retrieve relevant Global Brain memory for the complete user request.",
+    "add_entity_alias": "Add a persistent alias to a known person or project.",
+    "add_entity_relation": "Add a persistent relation between known entities.",
+    "get_integration_status": "Get integration status.",
+    "get_integration_usage": "Get integration token usage.",
+    "get_integration_reports": "Get integration events.",
+    "test_integration_connection": "Test an integration connection.",
+    "write_file": "Write a project file.",
+    "read_directory": "List a directory.",
+    "read_file": "Read a file.",
+}
 
-# --- CONFIG UPDATE: Enabled Transcription ---
-config = types.LiveConnectConfig(
-    response_modalities=["AUDIO"],
-    # We switch these from [] to {} to enable them with default settings
-    output_audio_transcription={}, 
-    input_audio_transcription={},
-    system_instruction=(
+
+def _compact_tool_schema(schema):
+    """Remove prose duplicated by names/types while preserving the callable contract."""
+    compact = json.loads(json.dumps(schema))
+    if compact["name"] in {"generate_cad", "retrieve_memory"}:
+        compact["description"] = TOOL_HINTS.get(compact["name"], compact.get("description", ""))
+    else:
+        compact.pop("description", None)
+    for prop in compact.get("parameters", {}).get("properties", {}).values():
+        prop.pop("description", None)
+    return compact
+
+
+_tool_declarations = [
+    generate_cad, run_web_agent, create_project_tool, switch_project_tool,
+    list_projects_tool, list_smart_devices_tool, control_light_tool,
+    discover_printers_tool, print_stl_tool, get_print_status_tool,
+    iterate_cad_tool, retrieve_memory_tool, add_entity_alias_tool, add_entity_relation_tool,
+    get_integration_status_tool,
+    get_integration_usage_tool, get_integration_reports_tool,
+    test_integration_connection_tool,
+] + tools_list[0]['function_declarations'][1:]
+tools = [
+    {'google_search': {}},
+    {"function_declarations": [_compact_tool_schema(item) for item in _tool_declarations]},
+]
+ACTION_REGISTRY = build_action_registry(tools[1]["function_declarations"])
+gateway_tools = [
+    {"google_search": {}},
+    {"function_declarations": build_gateway_declarations()},
+]
+
+
+def tools_for_mode(mode=None):
+    resolved, invalid = resolve_tool_mode(mode)
+    if invalid:
+        print("[VOICE_TOOLS] invalid LIVE_TOOL_MODE; falling back to legacy")
+    return (gateway_tools if resolved == GATEWAY_MODE else tools), resolved, invalid
+
+SYSTEM_INSTRUCTION = (
     f"Your name is {assistant_name}, which stands for {assistant_full_name}. "
     f"You are the personalized assistant of {owner_name}, and you address him as '{owner_title}'. "
     f"Your personality is {personality}. "
     f"{identity_note} "
     "For every request about Marcelo, his personal life, family, known people, preferences, goals, "
-    "companies, projects, or a follow-up about such a subject, call retrieve_memory before answering. "
+    "companies, projects, or a follow-up about such a subject, call retrieve_memory before answering, "
+    "unless a System Notification confirms retrieval for this turn. "
     "For any request to resume or recall the prior conversation, always call retrieve_memory before answering, "
     "even if Marcelo names no person or project. Never claim there is no saved context without calling it. "
     "Treat retrieved facts as authoritative. Answer naturally and never say 'based on my memory'. "
     "If retrieval returns no relevant facts, say you do not have that information instead of inventing it. "
     "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing."
-),
-    tools=tools,
-    speech_config=types.SpeechConfig(
+)
+
+
+def system_instruction_for_mode(mode):
+    if mode != GATEWAY_MODE:
+        return SYSTEM_INSTRUCTION
+    return SYSTEM_INSTRUCTION.replace(
+        "call retrieve_memory", "call memory_action with action retrieve_memory"
+    ).replace(
+        "calling it", "calling memory_action with action retrieve_memory"
+    )
+
+
+def build_live_config(resumption_handle=None, tool_mode=None):
+    trigger_tokens, target_tokens = compression_limits()
+    selected_tools, resolved_mode, _ = tools_for_mode(tool_mode)
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        output_audio_transcription={},
+        input_audio_transcription={},
+        session_resumption=types.SessionResumptionConfig(
+            handle=resumption_handle
+        ),
+        context_window_compression=types.ContextWindowCompressionConfig(
+            trigger_tokens=trigger_tokens,
+            sliding_window=types.SlidingWindow(target_tokens=target_tokens),
+        ),
+        system_instruction=system_instruction_for_mode(resolved_mode),
+        tools=selected_tools,
+        speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
             prebuilt_voice_config=types.PrebuiltVoiceConfig(
                 voice_name="Kore"
             )
         )
+        ),
     )
-)
+
+
+config = build_live_config()
+
+
+def static_context_diagnostics(tool_mode=None):
+    """Measure configuration shape without exposing instruction or schema content."""
+    trigger_tokens, target_tokens = compression_limits()
+    selected_tools, resolved_mode, invalid_mode = tools_for_mode(tool_mode)
+    metrics = schema_metrics(selected_tools[1]["function_declarations"])
+    system_chars = len(system_instruction_for_mode(resolved_mode))
+    return {
+        "system_instruction_chars": system_chars,
+        "system_instruction_estimated_tokens": math.ceil(system_chars / 4),
+        "tool_mode": resolved_mode,
+        "tool_mode_invalid": invalid_mode,
+        "external_tool_count": metrics["count"],
+        "internal_action_count": len(ACTION_REGISTRY),
+        "provider_tool_count": 1,
+        "tool_schema_chars": metrics["chars"],
+        "tool_schema_estimated_tokens": metrics["estimated_tokens"],
+        "tool_schema_hash": metrics["hash"],
+        "function_tool_count": metrics["count"],
+        "google_search_present": bool(selected_tools[0].get("google_search") == {}),
+        "compression_trigger_tokens": trigger_tokens,
+        "compression_target_tokens": target_tokens,
+        "turn_coverage": None,
+        "input_transcription_enabled": config.input_audio_transcription is not None,
+        "output_transcription_enabled": config.output_audio_transcription is not None,
+    }
 
 pya = pyaudio.PyAudio()
 
@@ -356,7 +512,16 @@ class AudioLoop:
         self._last_output_transcription = ""
         self._voice_turn_text = ""
         self._assistant_turn_text = ""
-        self._cold_start_context_sent = False
+        self.live_session = LiveSessionState()
+        self._active_tool_mode, self._tool_mode_invalid = resolve_tool_mode()
+        self._cold_start_diagnostics = {}
+        self._pending_retrieval_diagnostics = {}
+        self._manual_restoration_count = 0
+        self._fallback_pending = False
+        self._audio_metrics = {
+            "audio_chunks_total": 0, "audio_chunks_active": 0,
+            "audio_chunks_inactive": 0, "audio_duration_ms": 0,
+        }
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -548,6 +713,140 @@ class AudioLoop:
                 self._voice_send_logged = True
                 print(f"[VOICE_SEND] first audio chunk sent to Gemini bytes={len(msg['data'])}")
 
+    def _live_diagnostics(self):
+        diagnostics = {
+            **static_context_diagnostics(self._active_tool_mode), **self.live_session.sanitized(),
+            **self._audio_metrics, "model": MODEL,
+            "manual_restoration_count": self._manual_restoration_count,
+            "compression_inferred": False,
+        }
+        diagnostics["tool_mode_invalid"] = self._tool_mode_invalid
+        diagnostics.update({
+            f"cold_start_{key}": value
+            for key, value in self._cold_start_diagnostics.items()
+            if key in {
+                "estimated_tokens", "recent_reference_count", "preserved_references",
+                "has_summary", "has_important_turns", "deduplicated_items", "omitted_by_budget",
+            }
+        })
+        diagnostics.update(self._pending_retrieval_diagnostics)
+        if self._cold_start_diagnostics:
+            diagnostics["cold_start_chars"] = self._cold_start_diagnostics.get("after_chars")
+        return diagnostics
+
+    async def _send_cold_start_once(self):
+        if not self.live_session.begin_cold_start():
+            return False
+        success = False
+        try:
+            restoration, diagnostics = self.conversational_memory_analyzer.build_cold_start_context(
+                include_diagnostics=True
+            )
+            self._cold_start_diagnostics = diagnostics
+            if restoration:
+                print(
+                    f"[CONVERSATION_STATE] cold-start chars={diagnostics['after_chars']} "
+                    f"estimated_tokens={diagnostics['estimated_tokens']}"
+                )
+                await self.session.send(input=restoration, end_of_turn=False)
+            success = True
+            return bool(restoration)
+        finally:
+            self.live_session.complete_cold_start(success)
+
+    async def _send_minimal_reconnect_fallback(self):
+        restoration, diagnostics = self.conversational_memory_analyzer.build_cold_start_context(
+            max_chars=600, include_diagnostics=True
+        )
+        self._cold_start_diagnostics = diagnostics
+        if restoration:
+            await self.session.send(input=restoration, end_of_turn=False)
+            self._manual_restoration_count += 1
+            self.live_session.fallback_manual_used = True
+        self._fallback_pending = False
+        return bool(restoration)
+
+    def _prepare_live_tool_call(self, function_call):
+        """Translate one external gateway call without exposing callable lookup."""
+        if self._active_tool_mode != GATEWAY_MODE:
+            return function_call, None, None
+        try:
+            routed = route_gateway_call(
+                function_call.name, function_call.id, function_call.args, ACTION_REGISTRY
+            )
+        except ToolRoutingError as error:
+            response = types.FunctionResponse(
+                id=function_call.id,
+                name=function_call.name,
+                response=safe_routing_error(error),
+            )
+            return None, None, response
+        internal = SimpleNamespace(
+            id=function_call.id, name=routed.canonical_name, args=dict(routed.args)
+        )
+        return internal, routed, None
+
+    @staticmethod
+    def _externalize_tool_responses(function_responses, routed_calls):
+        """Restore gateway names while preserving Gemini function-call IDs."""
+        pending = list(routed_calls)
+        external = []
+        for response in function_responses:
+            match_index = next((
+                index for index, routed in enumerate(pending)
+                if routed.canonical_name == response.name
+                and (routed.call_id == response.id or routed.call_id is None)
+            ), None)
+            if match_index is None:
+                external.append(response)
+                continue
+            routed = pending.pop(match_index)
+            payload = dict(response.response or {})
+            payload.setdefault("action", routed.canonical_name)
+            if routed.request_id is not None:
+                payload.setdefault("request_id", routed.request_id)
+            external.append(types.FunctionResponse(
+                id=response.id, name=routed.external_name, response=payload
+            ))
+        return external
+
+    def _record_gateway_tool_telemetry(self, routed_calls, responses, duration_ms):
+        if not self.integration_manager:
+            return
+        for routed in routed_calls:
+            response = next((item for item in responses if item.id == routed.call_id), None)
+            response_payload = dict(response.response or {}) if response is not None else {}
+            denied = response_payload.get("result") == "User denied the request to use this tool."
+            spec = ACTION_REGISTRY[routed.canonical_name]
+            confirmation_required = (
+                spec.confirmation_required
+                and self.permissions.get(spec.permission_key, True)
+            )
+            request_hash = (
+                hashlib.sha256(routed.request_id.encode("utf-8")).hexdigest()[:12]
+                if routed.request_id else None
+            )
+            self.integration_manager.record_usage(
+                None,
+                request_type="live_tool_call",
+                model=MODEL,
+                success=response is not None and "error" not in response_payload,
+                latency_ms=duration_ms,
+                diagnostics={
+                    "tool_mode": GATEWAY_MODE,
+                    "gateway": routed.external_name,
+                    "canonical_action": routed.canonical_name,
+                    "confirmation_required": confirmation_required,
+                    "confirmation_outcome": (
+                        "denied" if denied else "approved" if confirmation_required else "not_required"
+                    ),
+                    "tool_retry": 0,
+                    "request_id_hash": request_hash,
+                    "tool_payload_bytes": routed.payload_size,
+                    "tool_result_bytes": len(json.dumps(response_payload, ensure_ascii=False).encode("utf-8")),
+                },
+            )
+
     async def listen_audio(self):
         if self.input_device_index is not None:
             print("[VOICE_INPUT] ignoring browser array index; PyAudio index spaces are unrelated")
@@ -593,6 +892,10 @@ class AudioLoop:
                     rms = int(math.sqrt(sum_squares / count))
                 else:
                     rms = 0
+                self._audio_metrics["audio_chunks_total"] += 1
+                self._audio_metrics["audio_duration_ms"] += round(count * 1000 / SEND_SAMPLE_RATE)
+                activity_key = "audio_chunks_active" if (self._is_speaking or rms > VAD_THRESHOLD) else "audio_chunks_inactive"
+                self._audio_metrics[activity_key] += 1
                 if not self._voice_input_chunk_logged:
                     self._voice_input_chunk_logged = True
                     print(f"[VOICE_INPUT] first chunk received bytes={len(data)} rms={rms}")
@@ -818,6 +1121,18 @@ class AudioLoop:
                         print("[VOICE_RECEIVE] first response received from Gemini")
                     if response.usage_metadata is not None:
                         self._pending_live_usage = response.usage_metadata
+                    if update := getattr(response, "session_resumption_update", None):
+                        self.live_session.update_resumption(
+                            resumable=update.resumable, new_handle=update.new_handle
+                        )
+                        print(
+                            "[VOICE_SESSION] resumption_update "
+                            f"resumable={update.resumable} handle_hash="
+                            f"{self.live_session.sanitized()['resumption_handle_hash'] or '-'}"
+                        )
+                    if getattr(response, "go_away", None):
+                        self.live_session.go_away_received = True
+                        print("[VOICE_SESSION] go_away received")
                     # 1. Handle Audio Data
                     if data := response.data:
                         self.audio_in_queue.put_nowait(data)
@@ -830,13 +1145,16 @@ class AudioLoop:
                     if response.server_content:
                         if response.server_content.turn_complete:
                             voice_turn_complete = True
+                            self.live_session.complete_turn()
                             if self.integration_manager and self._pending_live_usage is not None:
                                 self.integration_manager.record_usage(
                                     self._pending_live_usage,
                                     request_type="live",
                                     model=MODEL,
+                                    diagnostics=self._live_diagnostics(),
                                 )
                                 self._pending_live_usage = None
+                                self._pending_retrieval_diagnostics = {}
                         if response.server_content.input_transcription:
                             transcript = response.server_content.input_transcription.text
                             if transcript:
@@ -905,9 +1223,17 @@ class AudioLoop:
                     # 3. Handle Tool Calls
                     if response.tool_call:
                         print("The tool was called")
+                        tool_event_started = time.perf_counter()
                         function_responses = []
-                        for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "retrieve_memory", "get_integration_status", "get_integration_usage", "get_integration_reports", "test_integration_connection"]:
+                        routed_calls = []
+                        for external_fc in response.tool_call.function_calls:
+                            fc, routed, routing_error = self._prepare_live_tool_call(external_fc)
+                            if routing_error is not None:
+                                function_responses.append(routing_error)
+                                continue
+                            if routed is not None:
+                                routed_calls.append(routed)
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "retrieve_memory", "add_entity_alias", "add_entity_relation", "get_integration_status", "get_integration_usage", "get_integration_reports", "test_integration_connection"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
@@ -927,37 +1253,26 @@ class AudioLoop:
                                     if self.on_tool_confirmation:
                                         import uuid
                                         request_id = str(uuid.uuid4())
-                                    print(f"[ADA DEBUG] [STOP] Requesting confirmation for '{fc.name}' (ID: {request_id})")
-                                    
-                                    future = asyncio.Future()
-                                    self._pending_confirmations[request_id] = future
-                                    
-                                    self.on_tool_confirmation({
-                                        "id": request_id, 
-                                        "tool": fc.name, 
-                                        "args": fc.args
-                                    })
-                                    
-                                    try:
-                                        # Wait for user response
-                                        confirmed = await future
-
-                                    finally:
-                                        self._pending_confirmations.pop(request_id, None)
-
-                                    print(f"[ADA DEBUG] [CONFIRM] Request {request_id} resolved. Confirmed: {confirmed}")
-
-                                    if not confirmed:
-                                        print(f"[ADA DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
-                                        function_response = types.FunctionResponse(
-                                            id=fc.id,
-                                            name=fc.name,
-                                            response={
-                                                "result": "User denied the request to use this tool.",
-                                            }
-                                        )
-                                        function_responses.append(function_response)
-                                        continue
+                                        print(f"[ADA DEBUG] [STOP] Requesting confirmation for '{fc.name}' (ID: {request_id})")
+                                        future = asyncio.Future()
+                                        self._pending_confirmations[request_id] = future
+                                        self.on_tool_confirmation({
+                                            "id": request_id,
+                                            "gateway": routed.external_name if routed else None,
+                                            "tool": fc.name,
+                                            "args": fc.args,
+                                        })
+                                        try:
+                                            confirmed = await asyncio.wait_for(future, timeout=60)
+                                        except asyncio.TimeoutError:
+                                            confirmed = False
+                                            print(f"[ADA DEBUG] [CONFIRM] Request {request_id} timed out")
+                                        finally:
+                                            self._pending_confirmations.pop(request_id, None)
+                                        print(f"[ADA DEBUG] [CONFIRM] Request {request_id} resolved. Confirmed: {confirmed}")
+                                    else:
+                                        confirmed = False
+                                        print(f"[ADA DEBUG] [DENY] No confirmation channel for '{fc.name}'.")
 
                                     if not confirmed:
                                         print(f"[ADA DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
@@ -977,6 +1292,14 @@ class AudioLoop:
                                     memory_result = self.conversation_context_builder.build_context(
                                         query, channel="voice"
                                     )
+                                    memory_diagnostics = memory_result.get("context_diagnostics", {})
+                                    component = (memory_diagnostics.get("components") or [{}])[0]
+                                    self._pending_retrieval_diagnostics = {
+                                        "context_policy_route": memory_result.get("route"),
+                                        "retrieval_item_count": memory_result.get("item_count"),
+                                        "retrieval_context_chars": len(memory_result.get("context", "")),
+                                        "retrieval_estimated_tokens": component.get("estimated_tokens"),
+                                    }
                                     function_response = types.FunctionResponse(
                                         id=fc.id,
                                         name=fc.name,
@@ -992,6 +1315,35 @@ class AudioLoop:
                                         }
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "add_entity_alias":
+                                    try:
+                                        result = self.conversation_context_builder.memory.add_entity_alias(
+                                            fc.args.get("canonical_name", ""), fc.args.get("alias", "")
+                                        )
+                                    except ValueError as error:
+                                        result = {"error": str(error)}
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result}
+                                    ))
+
+                                elif fc.name == "add_entity_relation":
+                                    try:
+                                        result = self.conversation_context_builder.memory.add_entity_relation(
+                                            fc.args.get("source_entity", ""),
+                                            fc.args.get("relation_type", ""),
+                                            fc.args.get("target_entity", ""),
+                                            status=fc.args.get("status", ""),
+                                            summary=fc.args.get("summary", ""),
+                                            source=fc.args.get("source", ""),
+                                            confidence=fc.args.get("confidence", 1.0),
+                                            importance=fc.args.get("importance", "high"),
+                                        )
+                                    except ValueError as error:
+                                        result = {"error": str(error)}
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result}
+                                    ))
 
                                 elif fc.name == "get_integration_status":
                                     integration_id = fc.args.get("integration_id", "gemini")
@@ -1046,6 +1398,11 @@ class AudioLoop:
                                     
                                     asyncio.create_task(self.handle_cad_request(prompt))
                                     # No function response needed - model already acknowledged when user asked
+                                    if self._active_tool_mode == GATEWAY_MODE:
+                                        function_responses.append(types.FunctionResponse(
+                                            id=fc.id, name=fc.name,
+                                            response={"result": "CAD generation started."},
+                                        ))
                                 
                                 elif fc.name == "run_web_agent":
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'run_web_agent' with prompt='{prompt}'")
@@ -1371,18 +1728,22 @@ class AudioLoop:
                                     )
                                     function_responses.append(function_response)
                         if function_responses:
+                            if routed_calls:
+                                self._record_gateway_tool_telemetry(
+                                    routed_calls,
+                                    function_responses,
+                                    round((time.perf_counter() - tool_event_started) * 1000),
+                                )
+                                function_responses = self._externalize_tool_responses(
+                                    function_responses, routed_calls
+                                )
                             await self.session.send_tool_response(function_responses=function_responses)
 
                 # Tool calls can end an intermediate receive() without ending the turn.
                 # Persist only after Gemini explicitly marks the complete turn.
                 if voice_turn_complete:
-                    learning_result = self._process_completed_voice_turn()
+                    self._process_completed_voice_turn()
                     self._process_completed_assistant_turn()
-                    if learning_result and learning_result.get("reason") == "greeting":
-                        restoration = self.conversational_memory_analyzer.build_cold_start_context()
-                        if restoration:
-                            print(f"[CONVERSATION_STATE] refreshing after greeting chars={len(restoration)}")
-                            await self.session.send(input=restoration, end_of_turn=False)
                     # Reset STT delta tracking only with the actual completed turn.
                     self.flush_chat()
 
@@ -1488,14 +1849,26 @@ class AudioLoop:
         is_reconnect = False
         
         while not self.stop_event.is_set():
+            connection_established = False
             try:
+                self.live_session.begin_connection()
+                _, self._active_tool_mode, self._tool_mode_invalid = tools_for_mode()
+                connection_config = build_live_config(
+                    self.live_session.resumption_handle, self._active_tool_mode
+                )
                 print(f"[VOICE_LOOP] run started")
-                print(f"[VOICE_LIVE] connecting Gemini Live model={MODEL}")
+                print(
+                    f"[VOICE_LIVE] connecting model={MODEL} "
+                    f"logical_session={self.live_session.logical_session_id} "
+                    f"connection={self.live_session.connection_id} "
+                    f"resume={self.live_session.resumption_requested}"
+                )
                 async with (
-                    client.aio.live.connect(model=MODEL, config=config) as session,
+                    client.aio.live.connect(model=MODEL, config=connection_config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
+                    connection_established = True
                     print("[VOICE_LIVE] connected")
                     if self.integration_manager:
                         await self.integration_manager.mark_live_connected()
@@ -1503,14 +1876,11 @@ class AudioLoop:
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
 
-                    # A new process has no Gemini history. Preload persisted state
-                    # silently before opening normal microphone input.
-                    if not is_reconnect and not self._cold_start_context_sent:
-                        restoration = self.conversational_memory_analyzer.build_cold_start_context()
-                        if restoration:
-                            print(f"[CONVERSATION_STATE] cold-start restore chars={len(restoration)}")
-                            await self.session.send(input=restoration, end_of_turn=False)
-                        self._cold_start_context_sent = True
+                    if not is_reconnect:
+                        await self._send_cold_start_once()
+                    elif self._fallback_pending and not self.live_session.resumption_requested:
+                        print("[VOICE_SESSION] resumption unavailable; sending bounded fallback")
+                        await self._send_minimal_reconnect_fallback()
 
                     tg.create_task(self.send_realtime(), name="voice_send")
                     tg.create_task(self.listen_audio(), name="voice_input")
@@ -1535,21 +1905,11 @@ class AudioLoop:
                             self.on_project_update(self.project_manager.current_project)
                     
                     else:
-                        print(f"[ADA DEBUG] [RECONNECT] Connection restored.")
-                        # Restore Context
-                        print(f"[ADA DEBUG] [RECONNECT] Fetching recent chat history to restore context...")
-                        history = self.project_manager.get_recent_chat_history(limit=10)
-                        
-                        context_msg = "System Notification: Connection was lost and just re-established. Here is the recent chat history to help you resume seamlessly:\n\n"
-                        for entry in history:
-                            sender = entry.get('sender', 'Unknown')
-                            text = entry.get('text', '')
-                            context_msg += f"[{sender}]: {text}\n"
-                        
-                        context_msg += "\nPlease acknowledge the reconnection to the user (e.g. 'I lost connection for a moment, but I'm back...') and resume what you were doing."
-                        
-                        print(f"[ADA DEBUG] [RECONNECT] Sending restoration context to model...")
-                        await self.session.send(input=context_msg, end_of_turn=True)
+                        print(
+                            "[VOICE_SESSION] connection restored "
+                            f"resumption_requested={self.live_session.resumption_requested} "
+                            f"fallback={self.live_session.fallback_manual_used}"
+                        )
 
                     # Reset retry delay on successful connection
                     retry_delay = 1
@@ -1576,10 +1936,22 @@ class AudioLoop:
                 print(f"[VOICE_LIVE] connection/task failure: {type(e).__name__}: {e}")
                 self._log_exception_tree(e)
                 if self.integration_manager:
+                    self.integration_manager.record_usage(
+                        None, request_type="live_reconnect", model=MODEL,
+                        success=False, retry_count=1,
+                        diagnostics=self._live_diagnostics(),
+                    )
                     await self.integration_manager.mark_live_error(e)
                 
                 if self.stop_event.is_set():
                     break
+
+                if self.live_session.resumption_requested and not self.live_session.resumption_accepted:
+                    self.live_session.resumption_handle = None
+                    self.live_session.resumption_accepted = False
+                    self._fallback_pending = True
+                elif not self.live_session.resumption_handle:
+                    self._fallback_pending = True
                 
                 print(f"[ADA DEBUG] [RETRY] Reconnecting in {retry_delay} seconds...")
                 await asyncio.sleep(retry_delay)

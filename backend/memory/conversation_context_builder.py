@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from .entity_resolver import EntityResolver, normalize_text
+from .context_policy import ContextBudget, ContextPolicy, context_diagnostics
 from .memory_intelligence import MemoryIntelligence
 
 
@@ -43,6 +44,8 @@ class ConversationContextBuilder:
         self.memory = memory_manager
         self.resolver = EntityResolver(memory_manager)
         self.memory_intelligence = MemoryIntelligence(memory_manager, self.resolver)
+        self.context_policy = ContextPolicy()
+        self.context_budget = ContextBudget()
         self.max_context_chars = max_context_chars
         continuity = memory_manager.get_category("continuity")
         last_subject = continuity.get("last_subject")
@@ -56,9 +59,13 @@ class ConversationContextBuilder:
         query = (user_text or "").strip()
         intent = self.resolver.resolve_intent(query)
         if intent == "session_resume" and getattr(self, "conversation_state", None):
-            return self._session_resume_context(query, channel)
+            route = self.context_policy._route("entity_lookup", .98, "session_resume")
+            return self._apply_policy(self._session_resume_context(query, channel), route)
         nonsemantic_greeting = self.resolver.is_nonsemantic_greeting(query)
         resolved_entities = self.resolver.resolve_entities(query)
+        route = self.context_policy.classify(
+            query, intent=intent, entities=resolved_entities, is_greeting=nonsemantic_greeting
+        )
         plural_reference = any(
             marker in normalize_text(query)
             for marker in ("nas duas", "nos dois", "as duas", "os dois", "ambos", "ambas")
@@ -75,12 +82,16 @@ class ConversationContextBuilder:
             if len(plural_source) >= 2:
                 resolved_entities = [dict(entity) for entity in plural_source[:4]]
         if not nonsemantic_greeting and len(resolved_entities) > 1:
-            return self._multi_entity_context(query, channel, intent, resolved_entities)
+            return self._apply_policy(
+                self._multi_entity_context(query, channel, intent, resolved_entities), route
+            )
         time_filter = self.memory_intelligence.resolve_time_filter(query)
         if not nonsemantic_greeting and intent in {"event", "decision", "plan"} and (
             resolved_entities or time_filter or "ativos" in normalize_text(query)
         ):
-            return self._ranked_memory_context(query, channel, intent, resolved_entities, time_filter)
+            return self._apply_policy(
+                self._ranked_memory_context(query, channel, intent, resolved_entities, time_filter), route
+            )
         resolved = self.resolver.resolve_entity(query)
         prior_subject = self.current_subject
         if not nonsemantic_greeting and resolved is None and prior_subject and self.resolver.is_continuation(query):
@@ -111,10 +122,10 @@ class ConversationContextBuilder:
         context = self._format_context(items)
         entity_name = resolved["name"] if resolved else None
         print(
-            f"[MEMORY_CONTEXT] channel={channel} query={query!r} "
-            f"entity={entity_name or '-'} intent={intent} items={len(items)}"
+            f"[MEMORY_CONTEXT] channel={channel} query_chars={len(query)} "
+            f"entity_resolved={bool(entity_name)} intent={intent} items={len(items)}"
         )
-        return {
+        return self._apply_policy({
             "query": query,
             "channel": channel,
             "entity": entity_name,
@@ -123,7 +134,37 @@ class ConversationContextBuilder:
             "item_count": len(items),
             "context": context,
             "entities": [entity_name] if entity_name else [],
-        }
+        }, route)
+
+    def _apply_policy(self, result, route):
+        items = result.get("items", [])
+        if route.memory_mode == "none":
+            selected = []
+            stats = {
+                "candidate_items": len(items), "included_items": 0,
+                "removed_duplicates": 0, "deferred_items": len(items), "limit_chars": 0,
+            }
+            context = ""
+        elif result.get("intent") == "session_resume":
+            selected = items
+            context = result.get("context", "")
+            stats = {
+                "candidate_items": len(items), "included_items": len(items),
+                "removed_duplicates": 0, "deferred_items": 0,
+                "limit_chars": min(self.max_context_chars, route.token_budget * 4),
+            }
+        else:
+            memory_char_budget = min(self.max_context_chars, route.token_budget * 2)
+            selected, stats = self.context_budget.select(items, max_chars=memory_char_budget)
+            context = self._format_context(selected)
+        result["items"] = selected
+        result["item_count"] = len(selected)
+        result["context"] = context
+        result["route"] = route.category
+        result["context_diagnostics"] = context_diagnostics(
+            route, context, stats, included=bool(context)
+        )
+        return result
 
     def _multi_entity_context(self, query, channel, intent, entities):
         previous = [dict(entity) for entity in self.current_entities]
@@ -158,7 +199,7 @@ class ConversationContextBuilder:
         items = self._deduplicate(items)
         context = self._format_context(items)
         print(
-            f"[MEMORY_INTELLIGENCE] entities_resolved={entity_names} memories_selected={len(items)} "
+            f"[MEMORY_INTELLIGENCE] entities_resolved={len(entity_names)} memories_selected={len(items)} "
             f"context_chars={len(context)} ranking_ms={ranked['ranking_time_ms']:.2f}"
         )
         return {
@@ -193,7 +234,7 @@ class ConversationContextBuilder:
         context = self._format_context(items)
         names = [entity["name"] for entity in entities]
         print(
-            f"[MEMORY_INTELLIGENCE] entities_resolved={names} memories_selected={len(items)} "
+            f"[MEMORY_INTELLIGENCE] entities_resolved={len(names)} memories_selected={len(items)} "
             f"context_chars={len(context)} ranking_ms={ranked['ranking_time_ms']:.2f}"
         )
         return {
@@ -218,8 +259,8 @@ class ConversationContextBuilder:
         )
         context = prefix + restored
         print(
-            f"[MEMORY_CONTEXT] channel={channel} query={query!r} entity={topic or '-'} "
-            f"intent=session_resume has_context={has_context}"
+            f"[MEMORY_CONTEXT] channel={channel} query_chars={len(query)} "
+            f"entity_resolved={bool(topic)} intent=session_resume has_context={has_context}"
         )
         return {
             "query": query, "channel": channel, "entity": topic, "intent": "session_resume",

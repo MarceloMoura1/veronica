@@ -14,20 +14,7 @@ def normalize_text(text: str) -> str:
 
 
 class EntityResolver:
-    STATIC_ALIASES = {
-        "FaYerS": ("fayers", "fayer", "fires", "faiers"),
-        "MegaDesk": ("megadesk", "mega desk", "mega deste"),
-        "Christyan": ("christyan", "cristian", "christian"),
-        "JosianeFrancaDeMoura": (
-            "josiane", "josiane franca de moura", "minha mae", "mae do marcelo",
-        ),
-        "AntonioJocelioLacerdaDeMoura": (
-            "antonio", "antonio jocelio", "meu pai", "pai do marcelo",
-        ),
-        "Veronica": ("veronica", "assistente veronica"),
-        "Jarvis": ("jarvis",),
-        "Pedro": ("pedro",),
-    }
+    STATIC_ALIASES = {}
 
     def __init__(self, memory_manager):
         self.memory = memory_manager
@@ -39,6 +26,13 @@ class EntityResolver:
         candidates = {}
         known = {}
         facts = self.memory.get_category("facts")
+        persisted_aliases = self.memory.get_category("aliases")
+        alias_owners = {}
+        for owner, aliases in persisted_aliases.items():
+            for alias in aliases if isinstance(aliases, list) else ():
+                normalized_alias = normalize_text(str(alias))
+                if normalized_alias:
+                    alias_owners.setdefault(normalized_alias, set()).add(owner)
         for category in ("projects", "people"):
             for key, value in self.memory.get_category(category).items():
                 known[key] = category
@@ -47,6 +41,10 @@ class EntityResolver:
                     aliases.update(normalize_text(str(value.get(field, ""))) for field in ("name", "canonical_name"))
                 for alias in self.STATIC_ALIASES.get(key, ()):
                     aliases.add(normalize_text(alias))
+                for alias in persisted_aliases.get(key, ()):
+                    normalized_alias = normalize_text(str(alias))
+                    if len(alias_owners.get(normalized_alias, ())) == 1:
+                        aliases.add(normalized_alias)
                 entity_prefix = normalize_text(key).replace(" ", "")
                 for fact_key, fact_value in facts.items():
                     normalized_key = normalize_text(fact_key).replace(" ", "")
@@ -60,6 +58,19 @@ class EntityResolver:
                         candidate = (match.start(), -len(alias.split()), -len(alias), key, category)
                         if key not in candidates or candidate < candidates[key]:
                             candidates[key] = candidate
+        profile_name = self.memory.get_category("profile").get("name")
+        if profile_name:
+            profile_aliases = {normalize_text(str(profile_name))}
+            for alias in persisted_aliases.get(str(profile_name), ()):
+                normalized_alias = normalize_text(str(alias))
+                if len(alias_owners.get(normalized_alias, ())) == 1:
+                    profile_aliases.add(normalized_alias)
+            for alias in profile_aliases:
+                match = re.search(rf"(?:^|\s){re.escape(alias)}(?:$|\s)", normalized)
+                if match:
+                    candidate = (match.start(), -len(alias.split()), -len(alias), str(profile_name), "profile")
+                    if str(profile_name) not in candidates or candidate < candidates[str(profile_name)]:
+                        candidates[str(profile_name)] = candidate
         for key, aliases in self.STATIC_ALIASES.items():
             if key in known:
                 continue

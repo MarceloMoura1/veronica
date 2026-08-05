@@ -16,6 +16,7 @@ class MemoryIntelligence:
         "identity": {"people", "profile"}, "personal": {"people", "profile"},
         "preference": {"preferences"}, "operations": {"projects"},
         "overview": {"projects", "people"}, "goals": {"projects", "plans"},
+        "relationship": {"relations"},
     }
     IMPORTANCE_SCORES = {"low": 0.2, "medium": 0.7, "high": 1.4, "critical": 2.0}
     ACTIVE_PLAN_STATUSES = {"planned", "tentative"}
@@ -45,7 +46,7 @@ class MemoryIntelligence:
                 for field, value in data.items():
                     if value not in (None, "", [], {}):
                         candidates.append(self._candidate(category, entity, field, value, metadata=data))
-        for category in ("events", "decisions", "plans"):
+        for category in ("events", "decisions", "plans", "relations"):
             for memory_id, record in self.memory.get_category(category).items():
                 if not isinstance(record, dict):
                     continue

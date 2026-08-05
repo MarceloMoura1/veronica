@@ -1,0 +1,89 @@
+import pytest
+from pathlib import Path
+
+from backend.live_session import LiveSessionState, compression_limits, short_handle_hash
+
+
+def test_session_ids_are_random_and_connections_are_distinct():
+    first = LiveSessionState()
+    second = LiveSessionState()
+    first.begin_connection()
+    prior_connection = first.connection_id
+    first.begin_connection()
+
+    assert first.logical_session_id != second.logical_session_id
+    assert first.connection_id != prior_connection
+    assert len(first.logical_session_id) == len(first.connection_id) == 32
+
+
+def test_cold_start_is_idempotent_and_failure_can_retry():
+    state = LiveSessionState()
+    state.begin_connection()
+    assert state.begin_cold_start() is True
+    assert state.begin_cold_start() is False
+    state.complete_cold_start(False)
+    assert state.begin_cold_start() is True
+    state.complete_cold_start(True)
+    assert state.begin_cold_start() is False
+    assert state.cold_start_send_count == 1
+
+
+def test_resumption_prevents_cold_start_and_never_exposes_handle():
+    state = LiveSessionState(resumption_handle="secret-resumption-handle")
+    state.begin_connection()
+
+    assert state.resumption_requested is True
+    assert state.begin_cold_start() is False
+    diagnostics = state.sanitized()
+    assert diagnostics["resumption_handle_hash"] == short_handle_hash("secret-resumption-handle")
+    assert "secret-resumption-handle" not in repr(diagnostics)
+    assert "secret-resumption-handle" not in repr(state)
+
+
+def test_resumption_updates_only_with_valid_handle():
+    state = LiveSessionState(resumption_handle="old")
+    state.begin_connection()
+    state.update_resumption(resumable=True, new_handle="new")
+    assert state.resumption_handle == "new"
+    assert state.resumption_accepted is True
+    state.update_resumption(resumable=False, new_handle=None)
+    assert state.resumption_handle is None
+
+
+def test_turn_indexes_are_deterministic_per_connection():
+    state = LiveSessionState()
+    state.begin_connection()
+    state.complete_turn()
+    state.complete_turn()
+    assert (state.turn_index, state.connection_turn_index) == (2, 2)
+    state.begin_connection()
+    assert (state.turn_index, state.connection_turn_index) == (2, 0)
+
+
+def test_compression_defaults_and_validation(monkeypatch):
+    monkeypatch.delenv("GEMINI_LIVE_COMPRESSION_TRIGGER_TOKENS", raising=False)
+    monkeypatch.delenv("GEMINI_LIVE_COMPRESSION_TARGET_TOKENS", raising=False)
+    assert compression_limits() == (6000, 3000)
+
+    monkeypatch.setenv("GEMINI_LIVE_COMPRESSION_TRIGGER_TOKENS", "3000")
+    monkeypatch.setenv("GEMINI_LIVE_COMPRESSION_TARGET_TOKENS", "3000")
+    with pytest.raises(ValueError):
+        compression_limits()
+
+
+def test_sessions_never_share_resumption_handles():
+    first = LiveSessionState(resumption_handle="first")
+    second = LiveSessionState()
+    first.begin_connection()
+    second.begin_connection()
+    assert first.resumption_handle == "first"
+    assert second.resumption_handle is None
+
+
+def test_live_source_uses_official_resumption_without_ten_message_fallback():
+    source = (Path(__file__).parents[1] / "backend" / "ada.py").read_text(encoding="utf-8")
+    assert "types.SessionResumptionConfig" in source
+    assert "session_resumption_update" in source
+    assert "update.resumable" in source and "update.new_handle" in source
+    assert "get_recent_chat_history(limit=10)" not in source
+    assert "_send_minimal_reconnect_fallback" in source

@@ -1,0 +1,196 @@
+"""Regression and security tests for compact Gemini Live tool gateways."""
+import hashlib
+import json
+from types import SimpleNamespace
+
+import pytest
+from google import genai
+from google.genai import _live_converters, types
+
+import ada
+from live_tools import (
+    GATEWAY_ACTIONS, GATEWAY_MODE, LEGACY_MODE, ToolRoutingError, resolve_tool_mode,
+    route_gateway_call, schema_metrics,
+)
+
+
+LEGACY_HASH = "2649bc2f3e58f86a103e8697b31f186d0b6c5c2463034b9c3732a34084097d79"
+
+
+def _route(gateway, action, arguments=None, **extra):
+    payload = {
+        "action": action,
+        "arguments": json.dumps(arguments or {}, ensure_ascii=False),
+        **extra,
+    }
+    return route_gateway_call(gateway, "call-1", payload, ada.ACTION_REGISTRY)
+
+
+def test_missing_mode_defaults_to_legacy(monkeypatch):
+    monkeypatch.delenv("LIVE_TOOL_MODE", raising=False)
+    assert resolve_tool_mode() == (LEGACY_MODE, False)
+    selected, mode, invalid = ada.tools_for_mode()
+    assert selected is ada.tools and mode == LEGACY_MODE and invalid is False
+
+
+def test_invalid_mode_falls_back_safely(monkeypatch):
+    monkeypatch.setenv("LIVE_TOOL_MODE", "unsafe")
+    selected, mode, invalid = ada.tools_for_mode()
+    assert selected is ada.tools and mode == LEGACY_MODE and invalid is True
+
+
+def test_legacy_mode_is_byte_stable_and_keeps_provider_search():
+    selected, _, _ = ada.tools_for_mode("legacy")
+    canonical = json.dumps(selected, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    assert len(selected[1]["function_declarations"]) == 21
+    assert selected[0] == {"google_search": {}}
+    assert hashlib.sha256(canonical.encode()).hexdigest() == LEGACY_HASH
+
+
+def test_gateway_mode_has_four_declarations_and_provider_search():
+    selected, _, _ = ada.tools_for_mode("gateway")
+    assert selected[0] == {"google_search": {}}
+    assert [item["name"] for item in selected[1]["function_declarations"]] == list(GATEWAY_ACTIONS)
+
+
+def test_all_internal_actions_are_mapped_exactly_once():
+    mapped = [action for actions in GATEWAY_ACTIONS.values() for action in actions]
+    assert len(mapped) == len(set(mapped)) == 21
+    assert set(mapped) == set(ada.ACTION_REGISTRY)
+    assert all(spec.handler == spec.name for spec in ada.ACTION_REGISTRY.values())
+
+
+def test_gateway_routes_to_canonical_action_and_preserves_correlation():
+    routed = _route("memory_action", "retrieve_memory", {"query": "safe fixture"}, request_id="req-1")
+    assert routed.canonical_name == "retrieve_memory"
+    assert routed.external_name == "memory_action"
+    assert routed.call_id == "call-1" and routed.request_id == "req-1"
+    assert routed.args == {"query": "safe fixture"}
+
+
+@pytest.mark.parametrize("gateway,action,code", [
+    ("memory_action", "eval", "action_domain_mismatch"),
+    ("memory_action", "__import__", "action_domain_mismatch"),
+    ("memory_action", "write_file", "action_domain_mismatch"),
+    ("not_a_module", "retrieve_memory", "unknown_gateway"),
+])
+def test_unknown_cross_domain_and_code_like_actions_are_rejected(gateway, action, code):
+    with pytest.raises(ToolRoutingError, match="Unknown|not allowed") as captured:
+        _route(gateway, action)
+    assert captured.value.code == code
+
+
+def test_invalid_json_extra_missing_and_wrong_types_are_rejected():
+    with pytest.raises(ToolRoutingError) as captured:
+        route_gateway_call("memory_action", "1", {"action": "retrieve_memory", "arguments": "{"}, ada.ACTION_REGISTRY)
+    assert captured.value.code == "invalid_json"
+    with pytest.raises(ToolRoutingError) as captured:
+        _route("memory_action", "retrieve_memory", {"query": "x", "module": "os"})
+    assert captured.value.code == "extra_action_field"
+    with pytest.raises(ToolRoutingError) as captured:
+        _route("memory_action", "retrieve_memory", {})
+    assert captured.value.code == "missing_action_field"
+    with pytest.raises(ToolRoutingError) as captured:
+        _route("memory_action", "retrieve_memory", {"query": 7})
+    assert captured.value.code == "invalid_action_type"
+    with pytest.raises(ToolRoutingError) as captured:
+        route_gateway_call(
+            "memory_action", "1",
+            {"action": "retrieve_memory", "arguments": '{"query":"a","query":"b"}'},
+            ada.ACTION_REGISTRY,
+        )
+    assert captured.value.code == "duplicate_action_field"
+
+
+def test_oversized_payload_and_invalid_request_id_are_rejected():
+    with pytest.raises(ToolRoutingError) as captured:
+        _route("memory_action", "retrieve_memory", {"query": "x" * 17000})
+    assert captured.value.code == "payload_too_large"
+    with pytest.raises(ToolRoutingError) as captured:
+        _route("memory_action", "retrieve_memory", {"query": "x"}, request_id="bad request")
+    assert captured.value.code == "invalid_request_id"
+
+
+def test_external_response_uses_gateway_name_id_and_action():
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    internal = types.FunctionResponse(id="call-1", name="retrieve_memory", response={"result": "ok"})
+    routed = _route("memory_action", "retrieve_memory", {"query": "fixture"}, request_id="req-1")
+    response = loop._externalize_tool_responses([internal], [routed])[0]
+    assert response.id == "call-1" and response.name == "memory_action"
+    assert response.response == {"result": "ok", "action": "retrieve_memory", "request_id": "req-1"}
+
+
+def test_multiple_out_of_order_responses_remain_correlated():
+    first = _route("workspace_action", "read_file", {"path": "a.txt"})
+    second_payload = {"action": "list_projects", "arguments": "{}"}
+    second = route_gateway_call("workspace_action", "call-2", second_payload, ada.ACTION_REGISTRY)
+    responses = [
+        types.FunctionResponse(id="call-2", name="list_projects", response={"result": []}),
+        types.FunctionResponse(id="call-1", name="read_file", response={"result": "ok"}),
+    ]
+    external = ada.AudioLoop._externalize_tool_responses(responses, [first, second])
+    assert [(item.id, item.name, item.response["action"]) for item in external] == [
+        ("call-2", "workspace_action", "list_projects"),
+        ("call-1", "workspace_action", "read_file"),
+    ]
+
+
+def test_gateway_schema_reduces_external_schema_by_at_least_55_percent():
+    legacy = schema_metrics(ada.tools[1]["function_declarations"])
+    gateway = schema_metrics(ada.gateway_tools[1]["function_declarations"])
+    assert gateway["count"] == 4
+    assert gateway["chars"] <= legacy["chars"] * 0.45
+
+
+@pytest.mark.parametrize("mode", ["legacy", "gateway"])
+def test_real_sdk_converter_accepts_complete_live_config(mode):
+    client = genai.Client(api_key="test-key", http_options={"api_version": "v1beta"})
+    parent = {}
+    try:
+        converted = _live_converters._LiveConnectConfig_to_mldev(
+            client._api_client, ada.build_live_config(tool_mode=mode), parent
+        )
+    finally:
+        client.close()
+    assert isinstance(converted, dict)
+    assert len(parent["setup"]["tools"][1]["functionDeclarations"]) == (21 if mode == "legacy" else 4)
+
+
+def test_gateway_preparation_does_not_resolve_arbitrary_callables():
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop._active_tool_mode = GATEWAY_MODE
+    call = SimpleNamespace(
+        id="1", name="workspace_action",
+        args={"action": "read_file", "arguments": '{"path":"fixture.txt"}'},
+    )
+    internal, routed, error = loop._prepare_live_tool_call(call)
+    assert error is None and internal.name == routed.canonical_name == "read_file"
+    assert not hasattr(internal, "module") and not callable(internal.name)
+
+
+def test_tool_telemetry_contains_metadata_but_not_payload():
+    class FakeManager:
+        def __init__(self):
+            self.records = []
+
+        def record_usage(self, *args, **kwargs):
+            self.records.append((args, kwargs))
+
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop.integration_manager = FakeManager()
+    loop.permissions = {"read_file": False}
+    routed = _route(
+        "workspace_action", "read_file",
+        {"path": "private/fixture.txt"}, request_id="private-request-id",
+    )
+    response = types.FunctionResponse(id="call-1", name="read_file", response={"result": "private content"})
+    loop._record_gateway_tool_telemetry([routed], [response], 12)
+    diagnostics = loop.integration_manager.records[0][1]["diagnostics"]
+    serialized = json.dumps(diagnostics)
+    assert diagnostics["gateway"] == "workspace_action"
+    assert diagnostics["canonical_action"] == "read_file"
+    assert diagnostics["confirmation_outcome"] == "not_required"
+    assert diagnostics["tool_payload_bytes"] > 0 and diagnostics["tool_result_bytes"] > 0
+    assert "private/fixture.txt" not in serialized
+    assert "private content" not in serialized
+    assert "private-request-id" not in serialized

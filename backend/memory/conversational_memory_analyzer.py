@@ -128,8 +128,11 @@ class ConversationalMemoryAnalyzer:
     def record_assistant_turn(self, text):
         self.conversation_state.record_assistant_turn(text)
 
-    def build_cold_start_context(self):
-        return self.conversation_state.build_restoration_context(self.memory)
+    def build_cold_start_context(self, max_chars=1200, include_diagnostics=False):
+        context, diagnostics = self.conversation_state.build_compact_restoration_context(
+            self.memory, max_chars=max_chars
+        )
+        return (context, diagnostics) if include_diagnostics else context
 
     def _finish_turn(self, text, channel, result, subject, reason=None, interaction_type=None):
         self.conversation_state.record_user_turn(

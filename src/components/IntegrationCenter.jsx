@@ -11,6 +11,9 @@ const periods = [
 ];
 const formatNumber = (value) => Number.isFinite(value) ? value.toLocaleString('pt-BR') : 'Indisponível';
 const formatTime = (value) => value ? new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : 'Indisponível';
+const formatModalities = (details) => Array.isArray(details) && details.length
+    ? details.map(({ modality, token_count: count }) => `${modality || 'Não especificada'}: ${count == null ? 'Indisponível' : formatNumber(count)}`).join(' · ')
+    : null;
 
 function Status({ value }) {
     return <span className={`integration-status integration-status--${value || 'inactive'}`}><i />{statusLabels[value] || 'Indisponível'}</span>;
@@ -110,9 +113,13 @@ function IntegrationCenter({ socket }) {
                 <h3>Telemetria</h3>
                 <div className="integration-metrics">
                     <div><span>Tokens Entrada</span><strong>{formatNumber(usage.input_tokens)}</strong></div>
-                    <div><span>Tokens Saída</span><strong>{formatNumber(usage.output_tokens)}</strong></div>
+                    <div title="Tokens dos candidatos visíveis retornados pelo Gemini"><span>Saída</span><strong>{formatNumber(usage.visible_output_tokens ?? usage.output_tokens)}</strong></div>
+                    {usage.thinking_tokens != null && <div title="Tokens internos de raciocínio informados pelo Gemini"><span>Raciocínio</span><strong>{formatNumber(usage.thinking_tokens)}</strong></div>}
+                    {usage.cached_tokens != null && <div title="Tokens de conteúdo em cache informados pelo Gemini"><span>Cache</span><strong>{formatNumber(usage.cached_tokens)}</strong></div>}
+                    {usage.tool_prompt_tokens != null && <div title="Tokens de definições e uso de ferramentas informados pelo Gemini"><span>Ferramentas</span><strong>{formatNumber(usage.tool_prompt_tokens)}</strong></div>}
                     <div><span>Tokens Totais</span><strong>{formatNumber(usage.total_tokens)}</strong></div>
                     <div><span>Requisições</span><strong>{formatNumber(usage.requests)}</strong></div>
+                    {usage.retries > 0 && <div title="Tentativas adicionais após falhas de conexão"><span>Retries</span><strong>{formatNumber(usage.retries)}</strong></div>}
                     <div><span>Erros</span><strong>{formatNumber(usage.errors)}</strong></div>
                 </div>
             </section>
@@ -126,7 +133,7 @@ function IntegrationCenter({ socket }) {
             <section className="integration-section">
                 <h3>Histórico recente</h3>
                 <div className="integration-history">
-                    {usage.recent?.map((item, index) => <div key={`${item.timestamp}-${index}`}><time>{formatTime(item.timestamp)}</time><span>{item.request_type}</span><span>Prompt<br /><b>{item.input_tokens == null ? 'Indisponível' : `${formatNumber(item.input_tokens)} tokens`}</b></span><span>Resposta<br /><b>{item.output_tokens == null ? 'Indisponível' : `${formatNumber(item.output_tokens)} tokens`}</b></span><strong>{item.total_tokens == null ? 'Indisponível' : `${formatNumber(item.total_tokens)} total`}</strong></div>)}
+                    {usage.recent?.map((item, index) => <div key={`${item.timestamp}-${index}`}><time>{formatTime(item.timestamp)}</time><span>{item.request_type}</span><span>Prompt<br /><b>{item.input_tokens == null ? 'Indisponível' : `${formatNumber(item.input_tokens)} tokens`}</b>{formatModalities(item.prompt_tokens_details) && <small>{formatModalities(item.prompt_tokens_details)}</small>}{formatModalities(item.cache_tokens_details) && <small>{`Cache · ${formatModalities(item.cache_tokens_details)}`}</small>}{formatModalities(item.tool_use_prompt_tokens_details) && <small>{`Ferramentas · ${formatModalities(item.tool_use_prompt_tokens_details)}`}</small>}</span><span>Saída<br /><b>{(item.visible_output_tokens ?? item.output_tokens) == null ? 'Indisponível' : `${formatNumber(item.visible_output_tokens ?? item.output_tokens)} tokens`}</b>{formatModalities(item.output_tokens_details) && <small>{formatModalities(item.output_tokens_details)}</small>}{item.thinking_tokens != null && <small>{` + ${formatNumber(item.thinking_tokens)} raciocínio`}</small>}</span><strong>{item.total_tokens == null ? 'Indisponível' : `${formatNumber(item.total_tokens)} total`}</strong></div>)}
                     {!usage.recent?.length && <p>Nenhuma chamada registrada neste período.</p>}
                 </div>
             </section>
