@@ -16,6 +16,7 @@ from typing import Any, Iterable, Mapping
 
 LEGACY_MODE = "legacy"
 GATEWAY_MODE = "gateway"
+HYBRID_MODE = "hybrid"
 LIVE_TOOL_MODE_ENV = "LIVE_TOOL_MODE"
 MAX_GATEWAY_PAYLOAD_BYTES = 16 * 1024
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -37,6 +38,13 @@ GATEWAY_ACTIONS = {
     ),
 }
 
+HYBRID_GATEWAY_ACTIONS = {
+    "memory_admin_action": ("add_entity_alias", "add_entity_relation"),
+    "engineering_action": GATEWAY_ACTIONS["engineering_action"],
+    "device_action": GATEWAY_ACTIONS["device_action"],
+    "workspace_action": GATEWAY_ACTIONS["workspace_action"],
+}
+
 READ_ONLY_ACTIONS = {
     "retrieve_memory", "discover_printers", "get_print_status",
     "list_smart_devices", "read_file", "read_directory", "list_projects",
@@ -53,6 +61,10 @@ GATEWAY_DESCRIPTIONS = {
     "engineering_action": "CAD and 3D-printer operation.",
     "device_action": "Smart-device listing or control.",
     "workspace_action": "Web, file, project, or integration operation.",
+}
+HYBRID_GATEWAY_DESCRIPTIONS = {
+    **GATEWAY_DESCRIPTIONS,
+    "memory_admin_action": "Administrative memory writes; never use for retrieval.",
 }
 
 
@@ -92,7 +104,7 @@ class RoutedToolCall:
 def resolve_tool_mode(value: str | None = None) -> tuple[str, bool]:
     raw = os.getenv(LIVE_TOOL_MODE_ENV) if value is None else value
     normalized = (raw or LEGACY_MODE).strip().lower()
-    if normalized in {LEGACY_MODE, GATEWAY_MODE}:
+    if normalized in {LEGACY_MODE, GATEWAY_MODE, HYBRID_MODE}:
         return normalized, False
     return LEGACY_MODE, True
 
@@ -120,12 +132,14 @@ def build_action_registry(declarations: Iterable[Mapping[str, Any]]) -> dict[str
     return registry
 
 
-def build_gateway_declarations() -> list[dict[str, Any]]:
+def build_gateway_declarations(
+    gateway_actions: Mapping[str, tuple[str, ...]] = GATEWAY_ACTIONS,
+) -> list[dict[str, Any]]:
     declarations = []
-    for gateway, actions in GATEWAY_ACTIONS.items():
+    for gateway, actions in gateway_actions.items():
         declarations.append({
             "name": gateway,
-            "description": GATEWAY_DESCRIPTIONS[gateway],
+            "description": HYBRID_GATEWAY_DESCRIPTIONS[gateway],
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
@@ -154,8 +168,9 @@ def route_gateway_call(
     call_id: str | None,
     payload: Mapping[str, Any],
     registry: Mapping[str, ActionSpec],
+    gateway_actions: Mapping[str, tuple[str, ...]] = GATEWAY_ACTIONS,
 ) -> RoutedToolCall:
-    if gateway not in GATEWAY_ACTIONS:
+    if gateway not in gateway_actions:
         raise ToolRoutingError("unknown_gateway", "Unknown Live tool gateway.")
     if not isinstance(payload, Mapping):
         raise ToolRoutingError("invalid_payload", "Gateway payload must be an object.")
@@ -165,7 +180,7 @@ def route_gateway_call(
     action = payload.get("action")
     if not isinstance(action, str):
         raise ToolRoutingError("invalid_action", "Gateway action must be a string.")
-    if action not in GATEWAY_ACTIONS[gateway]:
+    if action not in gateway_actions[gateway]:
         raise ToolRoutingError("action_domain_mismatch", "Action is not allowed for this gateway.")
     if action in {"eval", "exec", "__import__"} or action not in registry:
         raise ToolRoutingError("unknown_action", "Unknown gateway action.")

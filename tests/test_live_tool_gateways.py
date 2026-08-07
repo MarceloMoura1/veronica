@@ -9,7 +9,8 @@ from google.genai import _live_converters, types
 
 import ada
 from live_tools import (
-    GATEWAY_ACTIONS, GATEWAY_MODE, LEGACY_MODE, ToolRoutingError, resolve_tool_mode,
+    GATEWAY_ACTIONS, GATEWAY_MODE, HYBRID_GATEWAY_ACTIONS, HYBRID_MODE,
+    LEGACY_MODE, ToolRoutingError, resolve_tool_mode,
     route_gateway_call, schema_metrics,
 )
 
@@ -51,6 +52,40 @@ def test_gateway_mode_has_four_declarations_and_provider_search():
     selected, _, _ = ada.tools_for_mode("gateway")
     assert selected[0] == {"google_search": {}}
     assert [item["name"] for item in selected[1]["function_declarations"]] == list(GATEWAY_ACTIONS)
+
+
+def test_hybrid_mode_keeps_retrieve_direct_and_has_four_operational_gateways():
+    selected, mode, invalid = ada.tools_for_mode("hybrid")
+    declarations = selected[1]["function_declarations"]
+    assert mode == HYBRID_MODE and invalid is False
+    assert selected[0] == {"google_search": {}}
+    assert [item["name"] for item in declarations] == [
+        "retrieve_memory", *HYBRID_GATEWAY_ACTIONS,
+    ]
+    assert declarations[0] is ada.tools[1]["function_declarations"][
+        next(i for i, item in enumerate(ada.tools[1]["function_declarations"]) if item["name"] == "retrieve_memory")
+    ]
+    assert declarations[0] == ada._legacy_declarations_by_name["retrieve_memory"]
+
+
+def test_hybrid_mapping_covers_twenty_gateway_actions_plus_direct_retrieval():
+    mapped = [action for actions in HYBRID_GATEWAY_ACTIONS.values() for action in actions]
+    assert len(mapped) == len(set(mapped)) == 20
+    assert "retrieve_memory" not in mapped
+    assert set(mapped) | {"retrieve_memory"} == set(ada.ACTION_REGISTRY)
+    assert HYBRID_GATEWAY_ACTIONS["memory_admin_action"] == (
+        "add_entity_alias", "add_entity_relation",
+    )
+
+
+def test_memory_admin_rejects_retrieval_as_cross_domain_action():
+    with pytest.raises(ToolRoutingError) as captured:
+        route_gateway_call(
+            "memory_admin_action", "1",
+            {"action": "retrieve_memory", "arguments": '{"query":"fixture"}'},
+            ada.ACTION_REGISTRY, HYBRID_GATEWAY_ACTIONS,
+        )
+    assert captured.value.code == "action_domain_mismatch"
 
 
 def test_all_internal_actions_are_mapped_exactly_once():
@@ -142,7 +177,7 @@ def test_gateway_schema_reduces_external_schema_by_at_least_55_percent():
     assert gateway["chars"] <= legacy["chars"] * 0.45
 
 
-@pytest.mark.parametrize("mode", ["legacy", "gateway"])
+@pytest.mark.parametrize("mode", ["legacy", "gateway", "hybrid"])
 def test_real_sdk_converter_accepts_complete_live_config(mode):
     client = genai.Client(api_key="test-key", http_options={"api_version": "v1beta"})
     parent = {}
@@ -153,7 +188,8 @@ def test_real_sdk_converter_accepts_complete_live_config(mode):
     finally:
         client.close()
     assert isinstance(converted, dict)
-    assert len(parent["setup"]["tools"][1]["functionDeclarations"]) == (21 if mode == "legacy" else 4)
+    expected = {"legacy": 21, "gateway": 4, "hybrid": 5}[mode]
+    assert len(parent["setup"]["tools"][1]["functionDeclarations"]) == expected
 
 
 def test_gateway_preparation_does_not_resolve_arbitrary_callables():
@@ -166,6 +202,31 @@ def test_gateway_preparation_does_not_resolve_arbitrary_callables():
     internal, routed, error = loop._prepare_live_tool_call(call)
     assert error is None and internal.name == routed.canonical_name == "read_file"
     assert not hasattr(internal, "module") and not callable(internal.name)
+
+
+def test_hybrid_retrieve_bypasses_gateway_and_preserves_name_and_id():
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop._active_tool_mode = HYBRID_MODE
+    call = SimpleNamespace(id="memory-call", name="retrieve_memory", args={"query": "fixture"})
+    internal, routed, error = loop._prepare_live_tool_call(call)
+    assert internal is call and routed is None and error is None
+    response = types.FunctionResponse(
+        id=internal.id, name=internal.name, response={"context": "sanitized fixture"}
+    )
+    assert response.id == "memory-call" and response.name == "retrieve_memory"
+
+
+def test_hybrid_system_instruction_keeps_direct_memory_guidance():
+    instruction = ada.system_instruction_for_mode("hybrid")
+    assert "call retrieve_memory" in instruction
+    assert "memory_action with action retrieve_memory" not in instruction
+    assert "MegaDesk" not in instruction
+
+
+def test_hybrid_build_failure_falls_back_to_legacy(monkeypatch):
+    monkeypatch.setattr(ada, "build_hybrid_tools", lambda: (_ for _ in ()).throw(RuntimeError("fixture")))
+    selected, mode, invalid = ada.tools_for_mode("hybrid")
+    assert selected is ada.tools and mode == LEGACY_MODE and invalid is True
 
 
 def test_tool_telemetry_contains_metadata_but_not_payload():
@@ -194,3 +255,37 @@ def test_tool_telemetry_contains_metadata_but_not_payload():
     assert "private/fixture.txt" not in serialized
     assert "private content" not in serialized
     assert "private-request-id" not in serialized
+
+
+def test_direct_memory_telemetry_omits_query_entities_and_content():
+    class FakeManager:
+        def __init__(self):
+            self.records = []
+
+        def record_usage(self, *args, **kwargs):
+            self.records.append(kwargs)
+
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop.integration_manager = FakeManager()
+    loop._active_tool_mode = HYBRID_MODE
+    result = {
+        "route": "entity_lookup", "item_count": 2,
+        "context": "private fixture content",
+        "entity": "private fixture entity",
+        "context_diagnostics": {"components": [{"estimated_tokens": 9}]},
+    }
+    loop._record_direct_memory_telemetry(result, 7)
+    record = loop.integration_manager.records[0]
+    serialized = json.dumps(record)
+    assert record["diagnostics"]["memory_tool"] == "retrieve_memory"
+    assert record["diagnostics"]["memory_category"] == "entity_lookup"
+    assert record["diagnostics"]["memory_item_count"] == 2
+    assert "private fixture content" not in serialized
+    assert "private fixture entity" not in serialized
+
+
+def test_hybrid_schema_reduces_external_schema_by_at_least_45_percent():
+    legacy = schema_metrics(ada.tools[1]["function_declarations"])
+    hybrid = schema_metrics(ada.hybrid_tools[1]["function_declarations"])
+    assert hybrid["count"] == 5
+    assert hybrid["chars"] <= legacy["chars"] * 0.55

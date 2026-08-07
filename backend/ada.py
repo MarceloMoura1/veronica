@@ -32,7 +32,7 @@ from tools import tools_list
 from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
 from live_session import LiveSessionState, compression_limits
 from live_tools import (
-    GATEWAY_MODE, ToolRoutingError, build_action_registry,
+    GATEWAY_MODE, HYBRID_GATEWAY_ACTIONS, HYBRID_MODE, ToolRoutingError, build_action_registry,
     build_gateway_declarations, resolve_tool_mode, route_gateway_call,
     safe_routing_error, schema_metrics,
 )
@@ -373,13 +373,38 @@ gateway_tools = [
     {"google_search": {}},
     {"function_declarations": build_gateway_declarations()},
 ]
+_legacy_declarations_by_name = {
+    item["name"]: item for item in tools[1]["function_declarations"]
+}
+
+
+def build_hybrid_tools():
+    """Keep retrieval direct and route only the other twenty actions."""
+    return [
+        {"google_search": {}},
+        {"function_declarations": [
+            _legacy_declarations_by_name["retrieve_memory"],
+            *build_gateway_declarations(HYBRID_GATEWAY_ACTIONS),
+        ]},
+    ]
+
+
+hybrid_tools = build_hybrid_tools()
 
 
 def tools_for_mode(mode=None):
     resolved, invalid = resolve_tool_mode(mode)
     if invalid:
         print("[VOICE_TOOLS] invalid LIVE_TOOL_MODE; falling back to legacy")
-    return (gateway_tools if resolved == GATEWAY_MODE else tools), resolved, invalid
+    if resolved == GATEWAY_MODE:
+        return gateway_tools, resolved, invalid
+    if resolved == HYBRID_MODE:
+        try:
+            return build_hybrid_tools(), resolved, invalid
+        except Exception as error:
+            print(f"[VOICE_TOOLS] hybrid build unavailable: {type(error).__name__}; falling back to legacy")
+            return tools, "legacy", True
+    return tools, resolved, invalid
 
 SYSTEM_INSTRUCTION = (
     f"Your name is {assistant_name}, which stands for {assistant_full_name}. "
@@ -448,6 +473,8 @@ def static_context_diagnostics(tool_mode=None):
         "tool_mode": resolved_mode,
         "tool_mode_invalid": invalid_mode,
         "external_tool_count": metrics["count"],
+        "direct_tool_count": metrics["count"] if resolved_mode == "legacy" else (1 if resolved_mode == HYBRID_MODE else 0),
+        "gateway_count": 4 if resolved_mode in {GATEWAY_MODE, HYBRID_MODE} else 0,
         "internal_action_count": len(ACTION_REGISTRY),
         "provider_tool_count": 1,
         "tool_schema_chars": metrics["chars"],
@@ -768,12 +795,22 @@ class AudioLoop:
 
     def _prepare_live_tool_call(self, function_call):
         """Translate one external gateway call without exposing callable lookup."""
-        if self._active_tool_mode != GATEWAY_MODE:
+        if self._active_tool_mode == "legacy":
             return function_call, None, None
+        if self._active_tool_mode == HYBRID_MODE and function_call.name == "retrieve_memory":
+            return function_call, None, None
+        gateway_actions = (
+            HYBRID_GATEWAY_ACTIONS
+            if self._active_tool_mode == HYBRID_MODE
+            else None
+        )
         try:
-            routed = route_gateway_call(
-                function_call.name, function_call.id, function_call.args, ACTION_REGISTRY
+            route_args = (
+                (function_call.name, function_call.id, function_call.args, ACTION_REGISTRY, gateway_actions)
+                if gateway_actions is not None
+                else (function_call.name, function_call.id, function_call.args, ACTION_REGISTRY)
             )
+            routed = route_gateway_call(*route_args)
         except ToolRoutingError as error:
             response = types.FunctionResponse(
                 id=function_call.id,
@@ -833,7 +870,7 @@ class AudioLoop:
                 success=response is not None and "error" not in response_payload,
                 latency_ms=duration_ms,
                 diagnostics={
-                    "tool_mode": GATEWAY_MODE,
+                    "tool_mode": getattr(self, "_active_tool_mode", GATEWAY_MODE),
                     "gateway": routed.external_name,
                     "canonical_action": routed.canonical_name,
                     "confirmation_required": confirmation_required,
@@ -846,6 +883,27 @@ class AudioLoop:
                     "tool_result_bytes": len(json.dumps(response_payload, ensure_ascii=False).encode("utf-8")),
                 },
             )
+
+    def _record_direct_memory_telemetry(self, memory_result, duration_ms):
+        if not self.integration_manager:
+            return
+        diagnostics = memory_result.get("context_diagnostics", {})
+        components = diagnostics.get("components") or [{}]
+        self.integration_manager.record_usage(
+            None,
+            request_type="live_memory_retrieval",
+            model=MODEL,
+            success=True,
+            latency_ms=duration_ms,
+            diagnostics={
+                "tool_mode": self._active_tool_mode,
+                "memory_tool": "retrieve_memory",
+                "memory_category": memory_result.get("route"),
+                "memory_item_count": memory_result.get("item_count"),
+                "memory_context_chars": len(memory_result.get("context", "")),
+                "memory_estimated_tokens": components[0].get("estimated_tokens"),
+            },
+        )
 
     async def listen_audio(self):
         if self.input_device_index is not None:
@@ -1300,6 +1358,11 @@ class AudioLoop:
                                         "retrieval_context_chars": len(memory_result.get("context", "")),
                                         "retrieval_estimated_tokens": component.get("estimated_tokens"),
                                     }
+                                    if self._active_tool_mode == HYBRID_MODE:
+                                        self._record_direct_memory_telemetry(
+                                            memory_result,
+                                            round((time.perf_counter() - tool_event_started) * 1000),
+                                        )
                                     function_response = types.FunctionResponse(
                                         id=fc.id,
                                         name=fc.name,
@@ -1398,7 +1461,7 @@ class AudioLoop:
                                     
                                     asyncio.create_task(self.handle_cad_request(prompt))
                                     # No function response needed - model already acknowledged when user asked
-                                    if self._active_tool_mode == GATEWAY_MODE:
+                                    if self._active_tool_mode in {GATEWAY_MODE, HYBRID_MODE}:
                                         function_responses.append(types.FunctionResponse(
                                             id=fc.id, name=fc.name,
                                             response={"result": "CAD generation started."},
