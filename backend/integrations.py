@@ -305,24 +305,25 @@ class TelemetryStore:
                 and start <= self._parse(item["timestamp"]).astimezone(local_tz).date() <= end
             ]
 
-        def total(field: str) -> int:
-            return sum(item.get(field) or 0 for item in records)
+        internal_event_types = {"live_memory_retrieval", "live_tool_routing", "live_tool_call"}
+        provider_records = [
+            item for item in records if item.get("request_type") not in internal_event_types
+        ]
+
+        def total(field: str, source: list[dict[str, Any]] = provider_records) -> int:
+            return sum(item.get(field) or 0 for item in source)
 
         def known(field: str) -> bool:
-            return any(item.get(field) is not None for item in records)
+            return any(item.get(field) is not None for item in provider_records)
 
         visible_output_total = sum(
             item.get("visible_output_tokens")
             if item.get("visible_output_tokens") is not None
             else (item.get("output_tokens") or 0)
-            for item in records
+            for item in provider_records
         )
 
         tool_records = [item for item in records if item.get("diagnostics", {}).get("tool_outcome")]
-        internal_event_types = {"live_memory_retrieval", "live_tool_routing", "live_tool_call"}
-        provider_records = [
-            item for item in records if item.get("request_type") not in internal_event_types
-        ]
         return {
             "period": period,
             "start_date": start.isoformat(),
@@ -419,6 +420,7 @@ class IntegrationManager:
         *,
         telemetry_path: Path | None = None,
         events_path: Path | None = None,
+        preferences_path: Path | None = None,
         env_path: Path | None = None,
         api_key: str | None = None,
         client_factory: Callable[[str], Any] | None = None,
@@ -439,6 +441,9 @@ class IntegrationManager:
         )
         self.events = IntegrationEventStore(
             events_path or project_root / "data" / "telemetry" / "integration_events.json"
+        )
+        self.preferences_path = Path(
+            preferences_path or project_root / "data" / "telemetry" / "integration_preferences.json"
         )
         try:
             sdk_version = importlib.metadata.version("google-genai")
@@ -489,7 +494,60 @@ class IntegrationManager:
             start_date=start_date,
             end_date=end_date,
         )
+        details["usage_monthly"] = self.telemetry.query(
+            integration_id=integration_id,
+            period="this_month",
+        )
+        details["preferences"] = self.get_preferences(integration_id)
         return details
+
+    def _read_preferences(self) -> dict[str, Any]:
+        if not self.preferences_path.exists():
+            return {}
+        try:
+            with self.preferences_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def get_preferences(self, integration_id: str) -> dict[str, Any]:
+        preferences = self._read_preferences().get(integration_id, {})
+        budget = preferences.get("monthly_token_budget") if isinstance(preferences, dict) else None
+        return {"monthly_token_budget": budget if isinstance(budget, int) and budget > 0 else None}
+
+    def update_monthly_token_budget(self, integration_id: str, value: Any) -> dict[str, Any]:
+        if isinstance(value, bool):
+            raise ValueError("A meta mensal deve ser um inteiro positivo")
+        try:
+            budget = int(value)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("A meta mensal deve ser um inteiro positivo") from error
+        if budget <= 0 or budget > 9_007_199_254_740_991 or str(value).strip() != str(budget):
+            raise ValueError("A meta mensal deve ser um inteiro positivo")
+        preferences = self._read_preferences()
+        integration_preferences = preferences.get(integration_id, {})
+        if not isinstance(integration_preferences, dict):
+            integration_preferences = {}
+        integration_preferences["monthly_token_budget"] = budget
+        preferences[integration_id] = integration_preferences
+        self.preferences_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix="integration_preferences.", suffix=".tmp", dir=self.preferences_path.parent
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(preferences, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.preferences_path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+        self._record_event(integration_id, "info", "configuration", "Meta mensal de tokens atualizada")
+        self._notify_soon()
+        return self.get_preferences(integration_id)
 
     def get_reports(self, integration_id: str = "gemini", *, limit: int = 20) -> dict[str, Any]:
         return {

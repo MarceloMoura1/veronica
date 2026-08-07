@@ -1127,6 +1127,27 @@ async def update_gemini_api_key(sid, data=None):
             room=sid,
         )
 
+
+@sio.event
+async def update_integration_budget(sid, data=None):
+    request = data or {}
+    integration_id = request.get("integration_id", "gemini")
+    try:
+        integration_manager.update_monthly_token_budget(
+            integration_id, request.get("monthly_token_budget")
+        )
+        await sio.emit(
+            "integration_details",
+            integration_manager.get_details(integration_id),
+            room=sid,
+        )
+    except (KeyError, ValueError, OSError) as error:
+        await sio.emit(
+            "integration_action_error",
+            {"message": str(error)[:300]},
+            room=sid,
+        )
+
 if __name__ == "__main__":
     uvicorn.run(
         "server:app_socketio", 

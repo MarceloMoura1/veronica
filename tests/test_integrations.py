@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import SimpleNamespace
 
+import pytest
+
 from integrations import IntegrationEventStore, IntegrationManager, IntegrationState, TelemetryStore
 
 
@@ -24,12 +26,57 @@ class FakeClient:
 def manager(tmp_path, *, api_key="", error=None, callback=None):
     return IntegrationManager(
         telemetry_path=tmp_path / "telemetry.json",
+        preferences_path=tmp_path / "preferences.json",
         events_path=tmp_path / "events.json",
         env_path=tmp_path / ".env",
         api_key=api_key,
         client_factory=lambda _key: FakeClient(error),
         event_callback=callback,
     )
+
+
+def test_monthly_budget_is_optional_and_persisted_without_secrets(tmp_path):
+    integration_manager = manager(tmp_path, api_key="secret")
+    assert integration_manager.get_preferences("gemini")["monthly_token_budget"] is None
+    assert integration_manager.update_monthly_token_budget("gemini", "1000000") == {
+        "monthly_token_budget": 1_000_000
+    }
+    persisted = (tmp_path / "preferences.json").read_text(encoding="utf-8")
+    assert "1000000" in persisted and "secret" not in persisted
+
+
+@pytest.mark.parametrize("value", [None, "", 0, -1, "1.5", float("nan"), 9_007_199_254_740_992])
+def test_monthly_budget_rejects_invalid_values(tmp_path, value):
+    with pytest.raises(ValueError):
+        manager(tmp_path).update_monthly_token_budget("gemini", value)
+
+
+def test_details_include_calendar_month_usage_and_budget(tmp_path):
+    integration_manager = manager(tmp_path)
+    integration_manager.update_monthly_token_budget("gemini", 100)
+    integration_manager.record_usage(
+        {"total_token_count": 25}, request_type="live"
+    )
+    details = integration_manager.get_details("gemini", period="today")
+    assert details["usage_monthly"]["period"] == "this_month"
+    assert details["usage_monthly"]["total_tokens"] == 25
+    assert details["preferences"]["monthly_token_budget"] == 100
+
+
+def test_internal_events_never_inflate_provider_tokens_or_requests(tmp_path):
+    store = TelemetryStore(tmp_path / "usage.json")
+    store.record(
+        model="m", request_type="live", success=True,
+        usage_metadata={"total_token_count": 20},
+    )
+    store.record(
+        model="m", request_type="live_tool_call", success=True,
+        usage_metadata={"total_token_count": 999},
+    )
+    summary = store.query()
+    assert summary["total_tokens"] == 20
+    assert summary["requests"] == 1
+    assert summary["internal_events"] == 1
 
 
 def test_registry_returns_only_real_gemini_integration(tmp_path):
