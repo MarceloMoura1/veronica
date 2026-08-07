@@ -1,4 +1,5 @@
 """Regression and security tests for compact Gemini Live tool gateways."""
+import asyncio
 import hashlib
 import json
 from types import SimpleNamespace
@@ -263,6 +264,19 @@ def test_hybrid_system_instruction_keeps_direct_memory_guidance():
     assert "call retrieve_memory" in instruction
     assert "memory_action with action retrieve_memory" not in instruction
     assert "MegaDesk" not in instruction
+    assert "current status" in instruction
+    assert "not retrieve_memory" in instruction
+
+
+def test_tool_contract_separates_persistent_memory_from_current_operations():
+    declarations = {
+        item["name"]: item for item in ada.hybrid_tools[1]["function_declarations"]
+    }
+    assert "memory" in declarations["retrieve_memory"]["description"].lower()
+    workspace = declarations["workspace_action"]["description"].lower()
+    assert "current integration" in workspace
+    assert "create_project" in workspace and "name" in workspace
+    assert "gemini" not in workspace
 
 
 def test_hybrid_build_failure_falls_back_to_legacy(monkeypatch):
@@ -328,6 +342,31 @@ def test_gateway_rejection_telemetry_is_sanitized_and_retry_is_bounded():
     assert "private-id" not in serialized and '"name": 123' not in serialized
 
 
+def test_extra_field_telemetry_records_only_sanitized_field_name():
+    class FakeManager:
+        def __init__(self):
+            self.records = []
+
+        def record_usage(self, *args, **kwargs):
+            self.records.append(kwargs)
+
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop._active_tool_mode = HYBRID_MODE
+    loop.integration_manager = FakeManager()
+    call = SimpleNamespace(
+        id="call-sensitive", name="workspace_action",
+        args={
+            "action": "create_project",
+            "arguments": '{"name":"private value","project_name":"private value"}',
+        },
+    )
+    error = loop._prepare_live_tool_call(call)[2]
+    diagnostics = loop.integration_manager.records[0]["diagnostics"]
+    assert error.response["error"]["code"] == "extra_action_field"
+    assert diagnostics["field_names"] == "project_name"
+    assert "private value" not in json.dumps(diagnostics)
+
+
 def test_confirmation_denial_is_not_classified_as_provider_error():
     class FakeManager:
         def __init__(self):
@@ -348,6 +387,36 @@ def test_confirmation_denial_is_not_classified_as_provider_error():
     record = loop.integration_manager.records[0]
     assert record["success"] is True
     assert record["diagnostics"]["tool_outcome"] == "confirmation_denied"
+
+
+def test_real_sdk_create_project_reaches_confirmation_and_denial_skips_handler():
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop._active_tool_mode = HYBRID_MODE
+    loop.integration_manager = None
+    loop.permissions = {"create_project": True}
+    loop._pending_confirmations = {}
+    confirmations = []
+    handler_calls = []
+
+    def deny(data):
+        confirmations.append({key: data[key] for key in ("gateway", "tool")})
+        loop.resolve_tool_confirmation(data["id"], False)
+
+    loop.on_tool_confirmation = deny
+    external = types.FunctionCall(
+        id="sdk-create-call", name="workspace_action",
+        args={"action": "create_project", "arguments": '{"name":"Fixture"}'},
+    )
+    internal, routed, error = loop._prepare_live_tool_call(external)
+    assert error is None and internal.name == "create_project"
+
+    async def guarded_dispatch():
+        if await loop._authorize_live_tool_call(internal, routed):
+            handler_calls.append(internal.name)
+
+    asyncio.run(guarded_dispatch())
+    assert confirmations == [{"gateway": "workspace_action", "tool": "create_project"}]
+    assert handler_calls == []
 
 
 def test_direct_memory_telemetry_omits_query_entities_and_content():

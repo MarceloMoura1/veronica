@@ -424,6 +424,10 @@ SYSTEM_INSTRUCTION = (
 
 
 def system_instruction_for_mode(mode):
+    if mode == HYBRID_MODE:
+        return SYSTEM_INSTRUCTION + (
+            " Use operational tools, not retrieve_memory, for current status, availability, connection, errors, latency, or usage."
+        )
     if mode != GATEWAY_MODE:
         return SYSTEM_INSTRUCTION
     return SYSTEM_INSTRUCTION.replace(
@@ -856,6 +860,7 @@ class AudioLoop:
             "invalid_action_value", "duplicate_action_field",
         }:
             stage = "schema_validation"
+        session_diagnostics = self._auxiliary_event_diagnostics()
         self.integration_manager.record_usage(
             None, request_type="live_tool_routing", model=MODEL, success=False,
             retry_count=retry_count,
@@ -866,14 +871,31 @@ class AudioLoop:
                 "tool_outcome": "gateway_rejection",
                 "dispatch_stage": stage,
                 "reason_code": error.code,
+                "field_names": ",".join(error.field_names) or None,
                 "arguments_container": container,
                 "parse_success": error.code != "invalid_json",
                 "validation_success": False,
                 "tool_retry": retry_count,
                 "tool_payload_bytes": payload_bytes,
+                "function_call_id_hash": self._identifier_hash(function_call.id),
+                **session_diagnostics,
             },
         )
         return retry_count
+
+    @staticmethod
+    def _identifier_hash(value):
+        if not value:
+            return None
+        return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
+
+    def _auxiliary_event_diagnostics(self):
+        live_session = getattr(self, "live_session", None)
+        if live_session is None:
+            return {}
+        diagnostics = live_session.sanitized()
+        diagnostics["turn_index"] = diagnostics.get("turn_index", 0) + 1
+        return diagnostics
 
     @staticmethod
     def _externalize_tool_responses(function_responses, routed_calls):
@@ -940,8 +962,10 @@ class AudioLoop:
                     "parse_success": True,
                     "validation_success": True,
                     "request_id_hash": request_hash,
+                    "function_call_id_hash": self._identifier_hash(routed.call_id),
                     "tool_payload_bytes": routed.payload_size,
                     "tool_result_bytes": len(json.dumps(response_payload, ensure_ascii=False).encode("utf-8")),
+                    **self._auxiliary_event_diagnostics(),
                 },
             )
 
@@ -961,10 +985,48 @@ class AudioLoop:
                 "memory_tool": "retrieve_memory",
                 "memory_category": memory_result.get("route"),
                 "memory_item_count": memory_result.get("item_count"),
+                "memory_candidate_count": components[0].get("candidate_count"),
+                "memory_selected_count": components[0].get("selected_count"),
                 "memory_context_chars": len(memory_result.get("context", "")),
                 "memory_estimated_tokens": components[0].get("estimated_tokens"),
+                **self._auxiliary_event_diagnostics(),
             },
         )
+
+    async def _authorize_live_tool_call(self, fc, routed=None):
+        confirmation_required = False if fc.name == "retrieve_memory" else self.permissions.get(fc.name, True)
+        if fc.name in {
+            "get_integration_status", "get_integration_usage", "get_integration_reports",
+            "test_integration_connection",
+        }:
+            confirmation_required = False
+        if not confirmation_required:
+            print(f"[ADA DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
+            return True
+        if not self.on_tool_confirmation:
+            print(f"[ADA DEBUG] [DENY] No confirmation channel for '{fc.name}'.")
+            return False
+        import uuid
+        request_id = str(uuid.uuid4())
+        print(f"[ADA DEBUG] [TOOL] Permission check: '{fc.name}' -> CONFIRM")
+        print(f"[ADA DEBUG] [STOP] Requesting confirmation for '{fc.name}' (ID: {request_id})")
+        future = asyncio.Future()
+        self._pending_confirmations[request_id] = future
+        self.on_tool_confirmation({
+            "id": request_id,
+            "gateway": routed.external_name if routed else None,
+            "tool": fc.name,
+            "args": fc.args,
+        })
+        try:
+            confirmed = await asyncio.wait_for(future, timeout=60)
+        except asyncio.TimeoutError:
+            confirmed = False
+            print(f"[ADA DEBUG] [CONFIRM] Request {request_id} timed out")
+        finally:
+            self._pending_confirmations.pop(request_id, None)
+        print(f"[ADA DEBUG] [CONFIRM] Request {request_id} resolved. Confirmed: {confirmed}")
+        return bool(confirmed)
 
     async def listen_audio(self):
         if self.input_device_index is not None:
@@ -1355,55 +1417,16 @@ class AudioLoop:
                             if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "retrieve_memory", "add_entity_alias", "add_entity_relation", "get_integration_status", "get_integration_usage", "get_integration_reports", "test_integration_connection"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
-                                # Check Permissions (Default to True if not set)
-                                confirmation_required = False if fc.name == "retrieve_memory" else self.permissions.get(fc.name, True)
-                                if fc.name in {
-                                    "get_integration_status", "get_integration_usage", "get_integration_reports",
-                                    "test_integration_connection"
-                                }:
-                                    confirmation_required = False
-                                
-                                if not confirmation_required:
-                                    print(f"[ADA DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
-                                    # Skip confirmation block and jump to execution
-                                    pass
-                                else:
-                                    # Confirmation Logic
-                                    if self.on_tool_confirmation:
-                                        import uuid
-                                        request_id = str(uuid.uuid4())
-                                        print(f"[ADA DEBUG] [STOP] Requesting confirmation for '{fc.name}' (ID: {request_id})")
-                                        future = asyncio.Future()
-                                        self._pending_confirmations[request_id] = future
-                                        self.on_tool_confirmation({
-                                            "id": request_id,
-                                            "gateway": routed.external_name if routed else None,
-                                            "tool": fc.name,
-                                            "args": fc.args,
-                                        })
-                                        try:
-                                            confirmed = await asyncio.wait_for(future, timeout=60)
-                                        except asyncio.TimeoutError:
-                                            confirmed = False
-                                            print(f"[ADA DEBUG] [CONFIRM] Request {request_id} timed out")
-                                        finally:
-                                            self._pending_confirmations.pop(request_id, None)
-                                        print(f"[ADA DEBUG] [CONFIRM] Request {request_id} resolved. Confirmed: {confirmed}")
-                                    else:
-                                        confirmed = False
-                                        print(f"[ADA DEBUG] [DENY] No confirmation channel for '{fc.name}'.")
-
-                                    if not confirmed:
-                                        print(f"[ADA DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
-                                        function_response = types.FunctionResponse(
-                                            id=fc.id,
-                                            name=fc.name,
-                                            response={
-                                                "result": "User denied the request to use this tool.",
-                                            }
-                                        )
-                                        function_responses.append(function_response)
-                                        continue
+                                confirmed = await self._authorize_live_tool_call(fc, routed)
+                                if not confirmed:
+                                    print(f"[ADA DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id,
+                                        name=fc.name,
+                                        response={"result": "User denied the request to use this tool."},
+                                    )
+                                    function_responses.append(function_response)
+                                    continue
 
                                 # If confirmed (or no callback configured, or auto-allowed), proceed
                                 if fc.name == "retrieve_memory":
@@ -1418,6 +1441,8 @@ class AudioLoop:
                                         "retrieval_item_count": memory_result.get("item_count"),
                                         "retrieval_context_chars": len(memory_result.get("context", "")),
                                         "retrieval_estimated_tokens": component.get("estimated_tokens"),
+                                        "retrieval_candidate_count": component.get("candidate_count"),
+                                        "retrieval_selected_count": component.get("selected_count"),
                                     }
                                     if self._active_tool_mode == HYBRID_MODE:
                                         self._record_direct_memory_telemetry(

@@ -322,3 +322,33 @@ def test_usage_distinguishes_provider_tool_and_confirmation_outcomes(tmp_path):
     assert summary["tool_errors"] == 1
     assert summary["tool_retries"] == 1
     assert summary["confirmation_denials"] == 1
+    assert summary["requests"] == 1
+    assert summary["internal_events"] == 3
+    assert summary["telemetry_events"] == 4
+
+
+def test_live_turn_diagnostics_derive_modalities_and_compression_state(tmp_path):
+    store = TelemetryStore(tmp_path / "usage.json")
+    record = store.record(
+        model="m", request_type="live", success=True,
+        usage_metadata={
+            "prompt_token_count": 6100,
+            "prompt_tokens_details": [
+                {"modality": "TEXT", "token_count": 700},
+                {"modality": "AUDIO", "token_count": 5400},
+            ],
+            "tool_use_prompt_token_count": 21,
+            "total_token_count": 6200,
+        },
+        diagnostics={
+            "compression_trigger_tokens": 6000,
+            "compression_target_tokens": 3000,
+        },
+    )
+    diagnostics = record["diagnostics"]
+    assert diagnostics["context_compression_configured"] is True
+    assert diagnostics["compression_threshold_crossed"] is True
+    assert diagnostics["compression_provider_confirmed"] is None
+    assert diagnostics["prompt_text_tokens"] == 700
+    assert diagnostics["prompt_audio_tokens"] == 5400
+    assert diagnostics["prompt_tool_tokens"] == 21

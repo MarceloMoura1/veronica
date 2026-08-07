@@ -1,7 +1,12 @@
+import asyncio
+import json
 import pytest
 from pathlib import Path
+from google import genai
+from google.genai import _common, _live_converters, live, types
 
 from backend.live_session import LiveSessionState, compression_limits, short_handle_hash
+from backend import ada
 
 
 def test_session_ids_are_random_and_connections_are_distinct():
@@ -87,3 +92,26 @@ def test_live_source_uses_official_resumption_without_ten_message_fallback():
     assert "update.resumable" in source and "update.new_handle" in source
     assert "get_recent_chat_history(limit=10)" not in source
     assert "_send_minimal_reconnect_fallback" in source
+
+
+def test_real_mldev_converter_serializes_context_compression_without_enterprise_fields():
+    client = genai.Client(api_key="test-key", http_options={"api_version": "v1beta"})
+    try:
+        parameter_model = asyncio.run(
+            live._t_live_connect_config(client._api_client, ada.build_live_config(tool_mode="hybrid"))
+        )
+        request = _common.convert_to_dict(
+            _live_converters._LiveConnectParameters_to_mldev(
+                api_client=client._api_client,
+                from_object=types.LiveConnectParameters(
+                    model="models/test-model", config=parameter_model,
+                ).model_dump(exclude_none=True),
+            )
+        )
+    finally:
+        client.close()
+    assert request["setup"]["contextWindowCompression"] == {
+        "trigger_tokens": 6000,
+        "sliding_window": {"target_tokens": 3000},
+    }
+    assert "transparent" not in json.dumps(request).lower()

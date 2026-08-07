@@ -63,6 +63,15 @@ class ConversationContextBuilder:
             return self._apply_policy(self._session_resume_context(query, channel), route)
         nonsemantic_greeting = self.resolver.is_nonsemantic_greeting(query)
         resolved_entities = self.resolver.resolve_entities(query)
+        if (
+            not resolved_entities and self.current_subject
+            and self.resolver.is_continuation(query)
+            and not any(
+                marker in normalize_text(query)
+                for marker in ("nas duas", "nos dois", "as duas", "os dois", "ambos", "ambas")
+            )
+        ):
+            resolved_entities = [dict(self.current_subject)]
         route = self.context_policy.classify(
             query, intent=intent, entities=resolved_entities, is_greeting=nonsemantic_greeting
         )
@@ -103,7 +112,7 @@ class ConversationContextBuilder:
             self.current_entities = [dict(resolved)]
 
         items = []
-        if nonsemantic_greeting:
+        if nonsemantic_greeting or route.memory_mode == "none":
             items = []
         elif resolved:
             items.extend(self._entity_items(resolved, intent))
@@ -133,7 +142,8 @@ class ConversationContextBuilder:
         }, route)
         print(
             f"[MEMORY_CONTEXT] channel={channel} query_chars={len(query)} "
-            f"entity_resolved={bool(entity_name)} intent={intent} items={result['item_count']}"
+            f"entity_resolved={bool(entity_name)} intent={intent} "
+            f"candidates={len(items)} items={result['item_count']}"
         )
         return result
 
@@ -201,10 +211,18 @@ class ConversationContextBuilder:
             }
             for memory in ranked["selected_memories"]
         ]
+        representatives = []
+        represented_ids = set()
+        for name in entity_names:
+            match = next((item for item in items if item.get("entity") == name), None)
+            if match is not None:
+                representatives.append(match)
+                represented_ids.add(id(match))
+        items = representatives + [item for item in items if id(item) not in represented_ids]
         items = self._deduplicate(items)
         context = self._format_context(items)
         print(
-            f"[MEMORY_INTELLIGENCE] entities_resolved={len(entity_names)} memories_selected={len(items)} "
+            f"[MEMORY_INTELLIGENCE] entities_resolved={len(entity_names)} candidate_memories={len(items)} "
             f"context_chars={len(context)} ranking_ms={ranked['ranking_time_ms']:.2f}"
         )
         return {
@@ -239,7 +257,7 @@ class ConversationContextBuilder:
         context = self._format_context(items)
         names = [entity["name"] for entity in entities]
         print(
-            f"[MEMORY_INTELLIGENCE] entities_resolved={len(names)} memories_selected={len(items)} "
+            f"[MEMORY_INTELLIGENCE] entities_resolved={len(names)} candidate_memories={len(items)} "
             f"context_chars={len(context)} ranking_ms={ranked['ranking_time_ms']:.2f}"
         )
         return {

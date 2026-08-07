@@ -176,6 +176,23 @@ class TelemetryStore:
         diagnostics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         usage = GeminiUsageNormalizer.normalize(usage_metadata)
+        safe_diagnostics = dict(diagnostics or {})
+        trigger = safe_diagnostics.get("compression_trigger_tokens")
+        if trigger is not None:
+            safe_diagnostics["context_compression_configured"] = True
+            safe_diagnostics["compression_threshold_crossed"] = bool(
+                usage["input_tokens"] is not None and usage["input_tokens"] >= trigger
+            )
+            safe_diagnostics["compression_provider_confirmed"] = None
+        prompt_details = usage.get("prompt_tokens_details") or []
+        for modality in ("TEXT", "AUDIO"):
+            if prompt_details:
+                safe_diagnostics[f"prompt_{modality.lower()}_tokens"] = sum(
+                    item.get("token_count") or 0 for item in prompt_details
+                    if str(item.get("modality", "")).upper() == modality
+                )
+        if usage.get("tool_prompt_tokens") is not None:
+            safe_diagnostics["prompt_tool_tokens"] = usage["tool_prompt_tokens"]
         record = {
             "timestamp": _now(),
             "integration_id": integration_id,
@@ -199,8 +216,8 @@ class TelemetryStore:
             "latency_ms": latency_ms,
             "success": bool(success),
         }
-        if diagnostics:
-            record["diagnostics"] = self._sanitize_diagnostics(diagnostics)
+        if safe_diagnostics:
+            record["diagnostics"] = self._sanitize_diagnostics(safe_diagnostics)
         with self._lock:
             records = self._read()
             records.append(record)
@@ -221,9 +238,11 @@ class TelemetryStore:
             "gateway", "canonical_action", "confirmation_required", "confirmation_outcome",
             "tool_retry", "request_id_hash", "tool_payload_bytes", "tool_result_bytes",
             "tool_outcome", "dispatch_stage", "reason_code", "arguments_container",
+            "field_names",
             "parse_success", "validation_success", "missing_field_count", "unexpected_field_count",
+            "function_call_id_hash",
             "memory_tool", "memory_category", "memory_item_count", "memory_context_chars",
-            "memory_estimated_tokens",
+            "memory_estimated_tokens", "memory_candidate_count", "memory_selected_count",
             "system_instruction_estimated_tokens", "tool_schema_chars",
             "tool_schema_estimated_tokens", "cold_start_chars", "cold_start_estimated_tokens",
             "cold_start_recent_reference_count", "cold_start_preserved_references",
@@ -235,6 +254,10 @@ class TelemetryStore:
             "audio_chunks_inactive", "audio_duration_ms", "compression_inferred",
             "context_policy_route", "retrieval_item_count", "retrieval_context_chars",
             "retrieval_estimated_tokens",
+            "retrieval_candidate_count", "retrieval_selected_count",
+            "context_compression_configured", "compression_threshold_crossed",
+            "compression_provider_confirmed", "prompt_text_tokens", "prompt_audio_tokens",
+            "prompt_tool_tokens",
         }
         result = {}
         for key, value in diagnostics.items():
@@ -296,6 +319,10 @@ class TelemetryStore:
         )
 
         tool_records = [item for item in records if item.get("diagnostics", {}).get("tool_outcome")]
+        internal_event_types = {"live_memory_retrieval", "live_tool_routing", "live_tool_call"}
+        provider_records = [
+            item for item in records if item.get("request_type") not in internal_event_types
+        ]
         return {
             "period": period,
             "start_date": start.isoformat(),
@@ -307,7 +334,12 @@ class TelemetryStore:
             "cached_tokens": total("cached_tokens") if known("cached_tokens") else None,
             "tool_prompt_tokens": total("tool_prompt_tokens") if known("tool_prompt_tokens") else None,
             "total_tokens": total("total_tokens"),
-            "requests": sum(item.get("request_count", 1) for item in records),
+            "requests": sum(item.get("request_count", 1) for item in provider_records),
+            "telemetry_events": sum(item.get("request_count", 1) for item in records),
+            "internal_events": sum(
+                item.get("request_count", 1) for item in records
+                if item.get("request_type") in internal_event_types
+            ),
             "retries": total("retry_count"),
             "errors": sum(1 for item in records if not item.get("success")),
             "integration_errors": sum(

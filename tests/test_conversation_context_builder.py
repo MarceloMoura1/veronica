@@ -222,11 +222,23 @@ def test_unknown_entity_is_not_invented(builder):
     assert result["entity"] is None
 
 
+def test_fallback_standard_reports_candidates_and_selected_budget(builder):
+    result = builder.build_context("Consulta genérica sobre assunto desconhecido")
+    component = result["context_diagnostics"]["components"][0]
+    assert result["route"] == "fallback_standard"
+    assert component["candidate_count"] >= component["selected_count"]
+    assert component["selected_count"] == result["item_count"]
+    assert result["item_count"] <= 3
+
+
 @pytest.mark.parametrize("query", [
     "Crie um projeto chamado Fixture.",
     "Liste meus projetos.",
     "Qual o status do Gemini?",
     "Abra o arquivo fixture.txt",
+    "Qual o status atual da integração Acme?",
+    "A integração Acme está online?",
+    "Quais erros recentes apareceram na integração Acme?",
 ])
 def test_explicit_operational_requests_skip_memory_prefetch(builder, query):
     result = builder.build_context(query)
@@ -249,12 +261,13 @@ def test_relational_query_keeps_multiple_global_entities(builder):
     assert "MegaDesk" in result["context"] and "FaYerS" in result["context"]
 
 
-def test_low_confidence_falls_back_to_complete_policy(builder):
+def test_low_confidence_falls_back_to_bounded_standard_policy(builder):
     result = builder.build_context("Explique torque em linguagem simples")
     diagnostics = result["context_diagnostics"]
-    assert result["route"] == "complex_task"
+    assert result["route"] == "fallback_standard"
     assert diagnostics["confidence"] < .5
-    assert diagnostics["tools_mode"] == "full"
+    assert diagnostics["tools_mode"] == "directed"
+    assert result["item_count"] <= 3
 
 
 def test_diagnostics_never_contain_query_or_memory_values(builder):

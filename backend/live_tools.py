@@ -65,15 +65,20 @@ GATEWAY_DESCRIPTIONS = {
 HYBRID_GATEWAY_DESCRIPTIONS = {
     **GATEWAY_DESCRIPTIONS,
     "memory_admin_action": "Administrative memory writes; never use for retrieval.",
+    "workspace_action": "Workspace/current integration operations; create_project arguments JSON uses only name.",
 }
 
 
 class ToolRoutingError(ValueError):
     """Safe validation failure for a model-supplied tool call."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, *, field_names: Iterable[Any] = ()):
         super().__init__(message)
         self.code = code
+        self.field_names = tuple(
+            name for name in field_names
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name)
+        )[:12]
 
 
 @dataclass(frozen=True)
@@ -138,6 +143,7 @@ def build_gateway_declarations(
 ) -> list[dict[str, Any]]:
     declarations = []
     for gateway, actions in gateway_actions.items():
+        argument_schema = {"type": "STRING"}
         declarations.append({
             "name": gateway,
             "description": HYBRID_GATEWAY_DESCRIPTIONS[gateway],
@@ -145,7 +151,7 @@ def build_gateway_declarations(
                 "type": "OBJECT",
                 "properties": {
                     "action": {"type": "STRING", "enum": list(actions)},
-                    "arguments": {"type": "STRING"},
+                    "arguments": argument_schema,
                 },
                 "required": ["action", "arguments"],
             },
@@ -231,10 +237,16 @@ def _validate_arguments(arguments: Mapping[str, Any], schema: Mapping[str, Any])
     properties = schema.get("properties", {})
     extra = set(arguments) - set(properties)
     if extra:
-        raise ToolRoutingError("extra_action_field", "Action arguments contain unsupported fields.")
+        raise ToolRoutingError(
+            "extra_action_field", "Action arguments contain unsupported fields.",
+            field_names=sorted(extra, key=str),
+        )
     missing = set(schema.get("required", [])) - set(arguments)
     if missing:
-        raise ToolRoutingError("missing_action_field", "Action arguments are missing required fields.")
+        raise ToolRoutingError(
+            "missing_action_field", "Action arguments are missing required fields.",
+            field_names=sorted(missing),
+        )
     for name, value in arguments.items():
         expected = properties[name].get("type")
         valid = {

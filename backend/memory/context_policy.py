@@ -24,12 +24,13 @@ class ContextPolicy:
         "minimal": 900,
         "operational": 0,
         "operational_context": 500,
+        "fallback_standard": 700,
         "entity_lookup": 1600,
         "relational": 3000,
         "complex_task": 6000,
     }
     ITEM_BUDGETS = {
-        "minimal": 0, "operational": 0, "operational_context": 4,
+        "minimal": 0, "operational": 0, "operational_context": 4, "fallback_standard": 3,
         "entity_lookup": 5, "relational": 10, "complex_task": 16,
     }
     ACTION_SIGNALS = (
@@ -46,6 +47,10 @@ class ContextPolicy:
         "aquele", "aquela", "esse", "essa", "ele", "ela",
     )
     DIRECT_TOOL_PHRASES = ("status do", "status da", "liste meus", "liste os", "liste as")
+    CURRENT_OPERATIONAL_SIGNALS = (
+        "status atual", "esta online", "disponibilidade", "erros recentes",
+        "latencia", "conexao", "uso atual",
+    )
     COMPLEX_SIGNALS = (
         "planeje", "analise", "arquitetura", "automatize", "relatorio", "compare",
         "implemente", "investigue", "estrategia", "passo a passo",
@@ -59,14 +64,17 @@ class ContextPolicy:
         text = normalize_text(query)
         actionable = any(re.search(rf"\b{re.escape(signal)}\b", text) for signal in self.ACTION_SIGNALS)
         explicit_tool_phrase = any(phrase in text for phrase in self.DIRECT_TOOL_PHRASES)
-        operational = (actionable or explicit_tool_phrase) and any(
-            re.search(rf"\b{re.escape(noun)}\b", text) for noun in self.OPERATIONAL_NOUNS
+        current_operational = any(signal in text for signal in self.CURRENT_OPERATIONAL_SIGNALS)
+        operational = current_operational or (
+            (actionable or explicit_tool_phrase) and any(
+                re.search(rf"\b{re.escape(noun)}\b", text) for noun in self.OPERATIONAL_NOUNS
+            )
         )
         context_dependent = any(
             re.search(rf"(?:^|\s){re.escape(marker)}(?:$|\s)", text)
             for marker in self.CONTEXT_DEPENDENCIES
         )
-        if operational and context_dependent and not entities:
+        if operational and context_dependent:
             return self._route("operational_context", .90, "tool_action_needs_context")
         if operational:
             return self._route("operational", .96, "explicit_tool_action")
@@ -74,14 +82,15 @@ class ContextPolicy:
             return self._route("complex_task", .92, "action_or_tool_signal")
         if is_greeting and len(text.split()) <= 12:
             return self._route("minimal", .99, "nonsemantic_conversation")
+        if entities and intent == "detail":
+            return self._route("complex_task", .93, "directed_detail_request")
         if len(entities) > 1 or any(signal in text for signal in self.RELATION_SIGNALS):
             return self._route("relational", .90, "multi_entity_or_relation")
         if entities or intent in {"identity", "personal", "preference", "event", "decision", "plan"}:
             return self._route("entity_lookup", .91, "directed_memory_lookup")
         if any(signal in text for signal in self.COMPLEX_SIGNALS) or len(text.split()) >= 24:
             return self._route("complex_task", .82, "complexity_signal")
-        # Unknown requests retain the broadest safe policy; no extra LLM call.
-        return self._route("complex_task", .45, "low_confidence_fallback")
+        return self._route("fallback_standard", .45, "low_confidence_fallback")
 
     def _route(self, category: str, confidence: float, reason: str) -> ContextRoute:
         return ContextRoute(
@@ -89,8 +98,12 @@ class ContextPolicy:
             confidence=confidence,
             reason=reason,
             token_budget=self.TOKEN_BUDGETS[category],
-            memory_mode="none" if category == "minimal" else "selective",
-            tools_mode="none" if category == "minimal" else ("directed" if category == "entity_lookup" else "full"),
+            memory_mode="none" if category in {"minimal", "operational"} else "selective",
+            tools_mode=(
+                "none" if category == "minimal" else
+                "directed" if category in {"entity_lookup", "operational_context", "fallback_standard"} else
+                "full"
+            ),
             item_budget=self.ITEM_BUDGETS[category],
         )
 
@@ -146,6 +159,8 @@ def context_diagnostics(route: ContextRoute, context: str, item_stats: dict, *, 
             "included": included,
             "reason": "selective_retrieval" if included else "not_required",
             "items": item_stats.get("included_items", 0),
+            "candidate_count": item_stats.get("candidate_items", 0),
+            "selected_count": item_stats.get("included_items", 0),
             "characters": len(context),
             "estimated_tokens": ContextBudget.estimate_tokens(context),
             "limit_chars": item_stats.get("limit_chars"),
