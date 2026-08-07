@@ -99,6 +99,7 @@ class RoutedToolCall:
     request_id: str | None
     args: Mapping[str, Any]
     payload_size: int
+    arguments_container: str
 
 
 def resolve_tool_mode(value: str | None = None) -> tuple[str, bool]:
@@ -190,19 +191,31 @@ def route_gateway_call(
     ):
         raise ToolRoutingError("invalid_request_id", "Invalid gateway request_id.")
     raw_arguments = payload.get("arguments")
-    if not isinstance(raw_arguments, str):
-        raise ToolRoutingError("invalid_arguments", "Gateway arguments must be a JSON string.")
-    payload_size = len(raw_arguments.encode("utf-8"))
+    if isinstance(raw_arguments, str):
+        arguments_container = "json_string"
+        payload_size = len(raw_arguments.encode("utf-8"))
+    elif isinstance(raw_arguments, Mapping):
+        arguments_container = "mapping"
+        try:
+            encoded_arguments = json.dumps(raw_arguments, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ToolRoutingError("invalid_arguments", "Gateway arguments must be JSON-compatible.") from exc
+        payload_size = len(encoded_arguments.encode("utf-8"))
+    else:
+        raise ToolRoutingError("invalid_arguments", "Gateway arguments must be a JSON string or object.")
     if payload_size > MAX_GATEWAY_PAYLOAD_BYTES:
         raise ToolRoutingError("payload_too_large", "Gateway arguments exceed the size limit.")
-    try:
-        arguments = json.loads(raw_arguments, object_pairs_hook=_reject_duplicate_keys)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ToolRoutingError("invalid_json", "Gateway arguments are not valid JSON.") from exc
+    if arguments_container == "json_string":
+        try:
+            arguments = json.loads(raw_arguments, object_pairs_hook=_reject_duplicate_keys)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ToolRoutingError("invalid_json", "Gateway arguments are not valid JSON.") from exc
+    else:
+        arguments = dict(raw_arguments)
     if not isinstance(arguments, dict):
         raise ToolRoutingError("invalid_arguments", "Gateway arguments must decode to an object.")
     _validate_arguments(arguments, registry[action].schema)
-    return RoutedToolCall(gateway, action, call_id, request_id, arguments, payload_size)
+    return RoutedToolCall(gateway, action, call_id, request_id, arguments, payload_size, arguments_container)
 
 
 def _reject_duplicate_keys(pairs):
@@ -239,5 +252,10 @@ def _validate_arguments(arguments: Mapping[str, Any], schema: Mapping[str, Any])
             raise ToolRoutingError("invalid_action_value", f"Invalid value for action field '{name}'.")
 
 
-def safe_routing_error(error: ToolRoutingError) -> dict[str, Any]:
-    return {"ok": False, "error": {"code": error.code, "message": str(error)}}
+def safe_routing_error(error: ToolRoutingError, *, retryable: bool | None = None) -> dict[str, Any]:
+    if retryable is None:
+        retryable = error.code in {
+            "invalid_arguments", "invalid_json", "missing_action_field",
+            "extra_action_field", "invalid_action_type", "invalid_action_value",
+        }
+    return {"ok": False, "error": {"code": error.code, "retryable": retryable}}

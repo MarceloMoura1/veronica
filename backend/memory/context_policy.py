@@ -16,19 +16,36 @@ class ContextRoute:
     token_budget: int
     memory_mode: str
     tools_mode: str
+    item_budget: int
 
 
 class ContextPolicy:
     TOKEN_BUDGETS = {
         "minimal": 900,
+        "operational": 0,
+        "operational_context": 500,
         "entity_lookup": 1600,
         "relational": 3000,
         "complex_task": 6000,
     }
+    ITEM_BUDGETS = {
+        "minimal": 0, "operational": 0, "operational_context": 4,
+        "entity_lookup": 5, "relational": 10, "complex_task": 16,
+    }
     ACTION_SIGNALS = (
         "crie", "abra", "execute", "rode", "envie", "salve", "escreva", "leia",
         "pesquise", "imprima", "ligue", "desligue", "controle", "gere", "acesse",
+        "liste", "verifique",
     )
+    OPERATIONAL_NOUNS = (
+        "projeto", "projetos", "arquivo", "status", "gemini", "integracao",
+        "impressora", "dispositivo", "luz", "diretorio",
+    )
+    CONTEXT_DEPENDENCIES = (
+        "que discutimos", "que falamos", "de ontem", "anterior", "ultimo",
+        "aquele", "aquela", "esse", "essa", "ele", "ela",
+    )
+    DIRECT_TOOL_PHRASES = ("status do", "status da", "liste meus", "liste os", "liste as")
     COMPLEX_SIGNALS = (
         "planeje", "analise", "arquitetura", "automatize", "relatorio", "compare",
         "implemente", "investigue", "estrategia", "passo a passo",
@@ -41,6 +58,18 @@ class ContextPolicy:
     def classify(self, query: str, *, intent: str, entities: list[dict], is_greeting: bool) -> ContextRoute:
         text = normalize_text(query)
         actionable = any(re.search(rf"\b{re.escape(signal)}\b", text) for signal in self.ACTION_SIGNALS)
+        explicit_tool_phrase = any(phrase in text for phrase in self.DIRECT_TOOL_PHRASES)
+        operational = (actionable or explicit_tool_phrase) and any(
+            re.search(rf"\b{re.escape(noun)}\b", text) for noun in self.OPERATIONAL_NOUNS
+        )
+        context_dependent = any(
+            re.search(rf"(?:^|\s){re.escape(marker)}(?:$|\s)", text)
+            for marker in self.CONTEXT_DEPENDENCIES
+        )
+        if operational and context_dependent and not entities:
+            return self._route("operational_context", .90, "tool_action_needs_context")
+        if operational:
+            return self._route("operational", .96, "explicit_tool_action")
         if actionable:
             return self._route("complex_task", .92, "action_or_tool_signal")
         if is_greeting and len(text.split()) <= 12:
@@ -62,6 +91,7 @@ class ContextPolicy:
             token_budget=self.TOKEN_BUDGETS[category],
             memory_mode="none" if category == "minimal" else "selective",
             tools_mode="none" if category == "minimal" else ("directed" if category == "entity_lookup" else "full"),
+            item_budget=self.ITEM_BUDGETS[category],
         )
 
 
@@ -72,11 +102,13 @@ class ContextBudget:
     def estimate_tokens(text: str) -> int:
         return math.ceil(len(text.encode("utf-8")) / 4) if text else 0
 
-    def select(self, items: list[dict], *, max_chars: int) -> tuple[list[dict], dict]:
+    def select(self, items: list[dict], *, max_chars: int, max_items: int | None = None) -> tuple[list[dict], dict]:
         selected, seen_paths, seen_values = [], set(), set()
         removed_duplicates = 0
         used_chars = 0
         for item in items:
+            if max_items is not None and len(selected) >= max_items:
+                break
             path = (item.get("category"), item.get("entity"), item.get("field"))
             value_key = normalize_text(str(item.get("value", "")))
             if path in seen_paths or (value_key and value_key in seen_values):
@@ -96,6 +128,7 @@ class ContextBudget:
             "removed_duplicates": removed_duplicates,
             "deferred_items": len(items) - len(selected) - removed_duplicates,
             "limit_chars": max_chars,
+            "limit_items": max_items,
         }
 
 
@@ -116,6 +149,7 @@ def context_diagnostics(route: ContextRoute, context: str, item_stats: dict, *, 
             "characters": len(context),
             "estimated_tokens": ContextBudget.estimate_tokens(context),
             "limit_chars": item_stats.get("limit_chars"),
+            "limit_items": item_stats.get("limit_items"),
             "removed_duplicates": item_stats.get("removed_duplicates", 0),
             "deferred_items": item_stats.get("deferred_items", 0),
         }],

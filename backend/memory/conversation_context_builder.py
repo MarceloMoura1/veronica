@@ -121,11 +121,7 @@ class ConversationContextBuilder:
         items = self._deduplicate(items)
         context = self._format_context(items)
         entity_name = resolved["name"] if resolved else None
-        print(
-            f"[MEMORY_CONTEXT] channel={channel} query_chars={len(query)} "
-            f"entity_resolved={bool(entity_name)} intent={intent} items={len(items)}"
-        )
-        return self._apply_policy({
+        result = self._apply_policy({
             "query": query,
             "channel": channel,
             "entity": entity_name,
@@ -135,6 +131,11 @@ class ConversationContextBuilder:
             "context": context,
             "entities": [entity_name] if entity_name else [],
         }, route)
+        print(
+            f"[MEMORY_CONTEXT] channel={channel} query_chars={len(query)} "
+            f"entity_resolved={bool(entity_name)} intent={intent} items={result['item_count']}"
+        )
+        return result
 
     def _apply_policy(self, result, route):
         items = result.get("items", [])
@@ -143,6 +144,7 @@ class ConversationContextBuilder:
             stats = {
                 "candidate_items": len(items), "included_items": 0,
                 "removed_duplicates": 0, "deferred_items": len(items), "limit_chars": 0,
+                "limit_items": 0,
             }
             context = ""
         elif result.get("intent") == "session_resume":
@@ -152,10 +154,13 @@ class ConversationContextBuilder:
                 "candidate_items": len(items), "included_items": len(items),
                 "removed_duplicates": 0, "deferred_items": 0,
                 "limit_chars": min(self.max_context_chars, route.token_budget * 4),
+                "limit_items": route.item_budget,
             }
         else:
             memory_char_budget = min(self.max_context_chars, route.token_budget * 2)
-            selected, stats = self.context_budget.select(items, max_chars=memory_char_budget)
+            selected, stats = self.context_budget.select(
+                items, max_chars=memory_char_budget, max_items=route.item_budget
+            )
             context = self._format_context(selected)
         result["items"] = selected
         result["item_count"] = len(selected)

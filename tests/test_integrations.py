@@ -299,3 +299,26 @@ def test_telemetry_diagnostics_are_sanitized(tmp_path):
     persisted = (tmp_path / "usage.json").read_text(encoding="utf-8")
     assert "private content" not in persisted
     assert "must-not-be-stored" not in persisted
+
+
+def test_usage_distinguishes_provider_tool_and_confirmation_outcomes(tmp_path):
+    store = TelemetryStore(tmp_path / "usage.json")
+    store.record(model="m", request_type="live", success=False)
+    store.record(
+        model="m", request_type="live_tool_routing", success=False, retry_count=1,
+        diagnostics={"tool_outcome": "gateway_rejection", "tool_retry": 1},
+    )
+    store.record(
+        model="m", request_type="live_tool_call", success=False,
+        diagnostics={"tool_outcome": "tool_execution_error"},
+    )
+    store.record(
+        model="m", request_type="live_tool_call", success=True,
+        diagnostics={"tool_outcome": "confirmation_denied"},
+    )
+    summary = store.query()
+    assert summary["integration_errors"] == 1
+    assert summary["tool_rejections"] == 1
+    assert summary["tool_errors"] == 1
+    assert summary["tool_retries"] == 1
+    assert summary["confirmation_denials"] == 1

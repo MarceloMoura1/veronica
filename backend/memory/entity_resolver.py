@@ -13,6 +13,14 @@ def normalize_text(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text))
 
 
+def identity_variants(text: str) -> set[str]:
+    """Return spaced and compact forms for names such as MegaDesk/megadesk."""
+    normalized = normalize_text(text)
+    if not normalized:
+        return set()
+    return {normalized, normalized.replace(" ", "")}
+
+
 class EntityResolver:
     STATIC_ALIASES = {}
 
@@ -30,26 +38,26 @@ class EntityResolver:
         alias_owners = {}
         for owner, aliases in persisted_aliases.items():
             for alias in aliases if isinstance(aliases, list) else ():
-                normalized_alias = normalize_text(str(alias))
-                if normalized_alias:
+                for normalized_alias in identity_variants(str(alias)):
                     alias_owners.setdefault(normalized_alias, set()).add(owner)
         for category in ("projects", "people"):
             for key, value in self.memory.get_category(category).items():
                 known[key] = category
-                aliases = {normalize_text(key)}
+                aliases = set(identity_variants(key))
                 if isinstance(value, dict):
-                    aliases.update(normalize_text(str(value.get(field, ""))) for field in ("name", "canonical_name"))
+                    for field in ("name", "canonical_name"):
+                        aliases.update(identity_variants(str(value.get(field, ""))))
                 for alias in self.STATIC_ALIASES.get(key, ()):
-                    aliases.add(normalize_text(alias))
+                    aliases.update(identity_variants(alias))
                 for alias in persisted_aliases.get(key, ()):
-                    normalized_alias = normalize_text(str(alias))
-                    if len(alias_owners.get(normalized_alias, ())) == 1:
-                        aliases.add(normalized_alias)
+                    for normalized_alias in identity_variants(str(alias)):
+                        if len(alias_owners.get(normalized_alias, ())) == 1:
+                            aliases.add(normalized_alias)
                 entity_prefix = normalize_text(key).replace(" ", "")
                 for fact_key, fact_value in facts.items():
                     normalized_key = normalize_text(fact_key).replace(" ", "")
                     if normalized_key.startswith(entity_prefix) and "alias" in normalized_key:
-                        aliases.add(normalize_text(str(fact_value)))
+                        aliases.update(identity_variants(str(fact_value)))
                 for alias in aliases:
                     if not alias:
                         continue
@@ -60,11 +68,11 @@ class EntityResolver:
                             candidates[key] = candidate
         profile_name = self.memory.get_category("profile").get("name")
         if profile_name:
-            profile_aliases = {normalize_text(str(profile_name))}
+            profile_aliases = set(identity_variants(str(profile_name)))
             for alias in persisted_aliases.get(str(profile_name), ()):
-                normalized_alias = normalize_text(str(alias))
-                if len(alias_owners.get(normalized_alias, ())) == 1:
-                    profile_aliases.add(normalized_alias)
+                for normalized_alias in identity_variants(str(alias)):
+                    if len(alias_owners.get(normalized_alias, ())) == 1:
+                        profile_aliases.add(normalized_alias)
             for alias in profile_aliases:
                 match = re.search(rf"(?:^|\s){re.escape(alias)}(?:$|\s)", normalized)
                 if match:
@@ -75,12 +83,12 @@ class EntityResolver:
             if key in known:
                 continue
             for alias in aliases:
-                normalized_alias = normalize_text(alias)
-                match = re.search(rf"(?:^|\s){re.escape(normalized_alias)}(?:$|\s)", normalized)
-                if match:
-                    candidate = (match.start(), -len(normalized_alias.split()), -len(normalized_alias), key, "facts")
-                    if key not in candidates or candidate < candidates[key]:
-                        candidates[key] = candidate
+                for normalized_alias in identity_variants(alias):
+                    match = re.search(rf"(?:^|\s){re.escape(normalized_alias)}(?:$|\s)", normalized)
+                    if match:
+                        candidate = (match.start(), -len(normalized_alias.split()), -len(normalized_alias), key, "facts")
+                        if key not in candidates or candidate < candidates[key]:
+                            candidates[key] = candidate
         if re.search(r"\beu\s+e\b|\be\s+eu\b", normalized):
             candidates["Marcelo"] = (-1, -1, -7, "Marcelo", "profile")
         vocative = bool(re.match(r"^(?:(?:bom dia|boa tarde|boa noite|oi|ola) )?veronica(?: |$)", normalized))
@@ -144,5 +152,6 @@ class EntityResolver:
             "esse projeto", "essa empresa", "o assunto", "voltando", "onde a gente parou",
             "nas duas", "nos dois", "as duas", "os dois", "ambos", "ambas",
             "e qual", "qual a meta", "o que a gente faria", "e o",
+            "que discutimos", "que falamos", "de ontem", "anterior",
         )
         return any(marker in normalized for marker in markers)

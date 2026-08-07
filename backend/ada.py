@@ -19,6 +19,7 @@ import re
 import struct
 import time
 import unicodedata
+from collections.abc import Mapping
 
 from google import genai
 from google.genai import types
@@ -812,16 +813,67 @@ class AudioLoop:
             )
             routed = route_gateway_call(*route_args)
         except ToolRoutingError as error:
+            retry_count = self._record_gateway_rejection_telemetry(function_call, error)
+            error_payload = safe_routing_error(error)
+            if retry_count:
+                error_payload["error"]["retryable"] = False
             response = types.FunctionResponse(
                 id=function_call.id,
                 name=function_call.name,
-                response=safe_routing_error(error),
+                response=error_payload,
             )
             return None, None, response
+        self._last_gateway_rejection = None
         internal = SimpleNamespace(
             id=function_call.id, name=routed.canonical_name, args=dict(routed.args)
         )
         return internal, routed, None
+
+    def _record_gateway_rejection_telemetry(self, function_call, error):
+        payload = function_call.args if isinstance(function_call.args, Mapping) else {}
+        action = payload.get("action")
+        safe_action = action if isinstance(action, str) and action in ACTION_REGISTRY else None
+        signature = (function_call.name, safe_action, error.code)
+        previous = getattr(self, "_last_gateway_rejection", None)
+        retry_count = 1 if previous == signature else 0
+        self._last_gateway_rejection = signature
+        if not getattr(self, "integration_manager", None):
+            return retry_count
+        raw_arguments = payload.get("arguments")
+        container = "json_string" if isinstance(raw_arguments, str) else (
+            "mapping" if isinstance(raw_arguments, Mapping) else "other"
+        )
+        payload_bytes = None
+        try:
+            payload_bytes = len(json.dumps(raw_arguments, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError):
+            pass
+        stage = "gateway_validation"
+        if error.code in {"invalid_arguments", "invalid_json", "payload_too_large"}:
+            stage = "argument_normalization"
+        elif error.code in {
+            "missing_action_field", "extra_action_field", "invalid_action_type",
+            "invalid_action_value", "duplicate_action_field",
+        }:
+            stage = "schema_validation"
+        self.integration_manager.record_usage(
+            None, request_type="live_tool_routing", model=MODEL, success=False,
+            retry_count=retry_count,
+            diagnostics={
+                "tool_mode": getattr(self, "_active_tool_mode", GATEWAY_MODE),
+                "gateway": function_call.name,
+                "canonical_action": safe_action,
+                "tool_outcome": "gateway_rejection",
+                "dispatch_stage": stage,
+                "reason_code": error.code,
+                "arguments_container": container,
+                "parse_success": error.code != "invalid_json",
+                "validation_success": False,
+                "tool_retry": retry_count,
+                "tool_payload_bytes": payload_bytes,
+            },
+        )
+        return retry_count
 
     @staticmethod
     def _externalize_tool_responses(function_responses, routed_calls):
@@ -854,6 +906,7 @@ class AudioLoop:
             response = next((item for item in responses if item.id == routed.call_id), None)
             response_payload = dict(response.response or {}) if response is not None else {}
             denied = response_payload.get("result") == "User denied the request to use this tool."
+            execution_error = "error" in response_payload
             spec = ACTION_REGISTRY[routed.canonical_name]
             confirmation_required = (
                 spec.confirmation_required
@@ -867,7 +920,7 @@ class AudioLoop:
                 None,
                 request_type="live_tool_call",
                 model=MODEL,
-                success=response is not None and "error" not in response_payload,
+                success=response is not None and not execution_error,
                 latency_ms=duration_ms,
                 diagnostics={
                     "tool_mode": getattr(self, "_active_tool_mode", GATEWAY_MODE),
@@ -878,6 +931,14 @@ class AudioLoop:
                         "denied" if denied else "approved" if confirmation_required else "not_required"
                     ),
                     "tool_retry": 0,
+                    "tool_outcome": (
+                        "confirmation_denied" if denied else
+                        "tool_execution_error" if execution_error else "success"
+                    ),
+                    "dispatch_stage": "confirmation" if denied else "handler_complete",
+                    "arguments_container": routed.arguments_container,
+                    "parse_success": True,
+                    "validation_success": True,
                     "request_id_hash": request_hash,
                     "tool_payload_bytes": routed.payload_size,
                     "tool_result_bytes": len(json.dumps(response_payload, ensure_ascii=False).encode("utf-8")),

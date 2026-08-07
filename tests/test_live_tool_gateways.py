@@ -11,7 +11,7 @@ import ada
 from live_tools import (
     GATEWAY_ACTIONS, GATEWAY_MODE, HYBRID_GATEWAY_ACTIONS, HYBRID_MODE,
     LEGACY_MODE, ToolRoutingError, resolve_tool_mode,
-    route_gateway_call, schema_metrics,
+    route_gateway_call, safe_routing_error, schema_metrics,
 )
 
 
@@ -103,6 +103,38 @@ def test_gateway_routes_to_canonical_action_and_preserves_correlation():
     assert routed.args == {"query": "safe fixture"}
 
 
+def test_workspace_create_project_accepts_sdk_mapping_arguments():
+    function_call = types.FunctionCall(
+        id="sdk-call", name="workspace_action",
+        args={"action": "create_project", "arguments": {"name": "Fixture"}},
+    )
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop._active_tool_mode = HYBRID_MODE
+    loop.integration_manager = None
+    internal, routed, error = loop._prepare_live_tool_call(function_call)
+    assert error is None
+    assert internal.id == "sdk-call" and internal.name == "create_project"
+    assert internal.args == {"name": "Fixture"}
+    assert routed.arguments_container == "mapping"
+    assert ada.ACTION_REGISTRY[internal.name].confirmation_required is True
+
+
+def test_workspace_create_project_keeps_valid_json_string_support():
+    routed = _route("workspace_action", "create_project", {"name": "Fixture"})
+    assert routed.canonical_name == "create_project"
+    assert routed.arguments_container == "json_string"
+
+
+def test_mapping_arguments_keep_closed_schema_validation():
+    with pytest.raises(ToolRoutingError) as captured:
+        route_gateway_call(
+            "workspace_action", "call-1",
+            {"action": "create_project", "arguments": {"name": "Fixture", "extra": True}},
+            ada.ACTION_REGISTRY,
+        )
+    assert captured.value.code == "extra_action_field"
+
+
 @pytest.mark.parametrize("gateway,action,code", [
     ("memory_action", "eval", "action_domain_mismatch"),
     ("memory_action", "__import__", "action_domain_mismatch"),
@@ -144,6 +176,16 @@ def test_oversized_payload_and_invalid_request_id_are_rejected():
     with pytest.raises(ToolRoutingError) as captured:
         _route("memory_action", "retrieve_memory", {"query": "x"}, request_id="bad request")
     assert captured.value.code == "invalid_request_id"
+
+
+def test_routing_error_is_structured_repairable_and_content_free():
+    error = ToolRoutingError("invalid_arguments", "private payload value")
+    payload = safe_routing_error(error)
+    assert payload == {
+        "ok": False,
+        "error": {"code": "invalid_arguments", "retryable": True},
+    }
+    assert "private payload value" not in json.dumps(payload)
 
 
 def test_external_response_uses_gateway_name_id_and_action():
@@ -255,6 +297,57 @@ def test_tool_telemetry_contains_metadata_but_not_payload():
     assert "private/fixture.txt" not in serialized
     assert "private content" not in serialized
     assert "private-request-id" not in serialized
+
+
+def test_gateway_rejection_telemetry_is_sanitized_and_retry_is_bounded():
+    class FakeManager:
+        def __init__(self):
+            self.records = []
+
+        def record_usage(self, *args, **kwargs):
+            self.records.append(kwargs)
+
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop._active_tool_mode = HYBRID_MODE
+    loop.integration_manager = FakeManager()
+    call = SimpleNamespace(
+        id="private-id", name="workspace_action",
+        args={"action": "create_project", "arguments": {"name": 123}},
+    )
+    first = loop._prepare_live_tool_call(call)[2]
+    second = loop._prepare_live_tool_call(call)[2]
+    assert first.response["error"]["retryable"] is True
+    assert second.response["error"]["retryable"] is False
+    first_diag = loop.integration_manager.records[0]["diagnostics"]
+    second_diag = loop.integration_manager.records[1]["diagnostics"]
+    assert first_diag["tool_outcome"] == "gateway_rejection"
+    assert first_diag["arguments_container"] == "mapping"
+    assert first_diag["reason_code"] == "invalid_action_type"
+    assert first_diag["tool_retry"] == 0 and second_diag["tool_retry"] == 1
+    serialized = json.dumps(loop.integration_manager.records)
+    assert "private-id" not in serialized and '"name": 123' not in serialized
+
+
+def test_confirmation_denial_is_not_classified_as_provider_error():
+    class FakeManager:
+        def __init__(self):
+            self.records = []
+
+        def record_usage(self, *args, **kwargs):
+            self.records.append(kwargs)
+
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop.integration_manager = FakeManager()
+    loop.permissions = {"create_project": True}
+    routed = _route("workspace_action", "create_project", {"name": "Fixture"})
+    response = types.FunctionResponse(
+        id="call-1", name="create_project",
+        response={"result": "User denied the request to use this tool."},
+    )
+    loop._record_gateway_tool_telemetry([routed], [response], 4)
+    record = loop.integration_manager.records[0]
+    assert record["success"] is True
+    assert record["diagnostics"]["tool_outcome"] == "confirmation_denied"
 
 
 def test_direct_memory_telemetry_omits_query_entities_and_content():

@@ -194,7 +194,8 @@ def test_greeting_uses_minimal_context_without_memory(builder):
 
 def test_actionable_request_never_takes_greeting_fast_path(builder):
     result = builder.build_context("Olá, ligue a luz do escritório")
-    assert result["route"] == "complex_task"
+    assert result["route"] == "operational"
+    assert result["item_count"] == 0
     assert result["context_diagnostics"]["tools_mode"] == "full"
 
 
@@ -204,6 +205,41 @@ def test_entity_lookup_is_directed_and_budgeted(builder):
     assert result["entity"] == "MegaDesk"
     assert result["context_diagnostics"]["token_budget"] == 1600
     assert result["context_diagnostics"]["components"][0]["estimated_tokens"] <= 1600
+    assert result["item_count"] <= 6
+
+
+@pytest.mark.parametrize("query", [
+    "megadesk", "MEGADESK", "Me fale sobre o megadesk!", "Me fale sobre o MegaDesk.",
+])
+def test_canonical_entity_resolves_across_case_compaction_and_punctuation(builder, query):
+    result = builder.build_context(query)
+    assert result["entity"] == "MegaDesk"
+    assert result["route"] == "entity_lookup"
+
+
+def test_unknown_entity_is_not_invented(builder):
+    result = builder.build_context("Me fale sobre Projeto Inexistente Zeta")
+    assert result["entity"] is None
+
+
+@pytest.mark.parametrize("query", [
+    "Crie um projeto chamado Fixture.",
+    "Liste meus projetos.",
+    "Qual o status do Gemini?",
+    "Abra o arquivo fixture.txt",
+])
+def test_explicit_operational_requests_skip_memory_prefetch(builder, query):
+    result = builder.build_context(query)
+    assert result["route"] == "operational"
+    assert result["context"] == "" and result["item_count"] == 0
+
+
+def test_context_dependent_operation_allows_directed_retrieval(builder):
+    builder.build_context("Me fale sobre o MegaDesk")
+    result = builder.build_context("Abra o projeto que discutimos ontem")
+    assert result["route"] == "operational_context"
+    assert result["entity"] == "MegaDesk"
+    assert 0 < result["item_count"] <= 4
 
 
 def test_relational_query_keeps_multiple_global_entities(builder):

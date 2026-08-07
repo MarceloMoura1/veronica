@@ -220,6 +220,8 @@ class TelemetryStore:
             "direct_tool_count", "gateway_count", "provider_tool_count", "tool_schema_hash",
             "gateway", "canonical_action", "confirmation_required", "confirmation_outcome",
             "tool_retry", "request_id_hash", "tool_payload_bytes", "tool_result_bytes",
+            "tool_outcome", "dispatch_stage", "reason_code", "arguments_container",
+            "parse_success", "validation_success", "missing_field_count", "unexpected_field_count",
             "memory_tool", "memory_category", "memory_item_count", "memory_context_chars",
             "memory_estimated_tokens",
             "system_instruction_estimated_tokens", "tool_schema_chars",
@@ -293,6 +295,7 @@ class TelemetryStore:
             for item in records
         )
 
+        tool_records = [item for item in records if item.get("diagnostics", {}).get("tool_outcome")]
         return {
             "period": period,
             "start_date": start.isoformat(),
@@ -307,6 +310,25 @@ class TelemetryStore:
             "requests": sum(item.get("request_count", 1) for item in records),
             "retries": total("retry_count"),
             "errors": sum(1 for item in records if not item.get("success")),
+            "integration_errors": sum(
+                1 for item in records
+                if not item.get("success") and not item.get("diagnostics", {}).get("tool_outcome")
+            ),
+            "tool_errors": sum(
+                1 for item in tool_records
+                if item.get("diagnostics", {}).get("tool_outcome") == "tool_execution_error"
+            ),
+            "tool_rejections": sum(
+                1 for item in tool_records
+                if item.get("diagnostics", {}).get("tool_outcome") == "gateway_rejection"
+            ),
+            "tool_retries": sum(
+                item.get("diagnostics", {}).get("tool_retry", 0) or 0 for item in tool_records
+            ),
+            "confirmation_denials": sum(
+                1 for item in tool_records
+                if item.get("diagnostics", {}).get("tool_outcome") == "confirmation_denied"
+            ),
             "estimated_cost": None,
             "cost_status": "not_configured",
             "recent": list(reversed(records[-max(0, min(limit, 100)) :])),
