@@ -32,6 +32,7 @@ if sys.version_info < (3, 11, 0):
 from tools import tools_list
 from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
 from live_session import LiveSessionState, compression_limits
+from voice_transcription import VoiceTranscriptionTurns
 from live_tools import (
     GATEWAY_MODE, HYBRID_GATEWAY_ACTIONS, HYBRID_MODE, ToolRoutingError, build_action_registry,
     build_gateway_declarations, resolve_tool_mode, route_gateway_call,
@@ -442,8 +443,11 @@ def build_live_config(resumption_handle=None, tool_mode=None):
     selected_tools, resolved_mode, _ = tools_for_mode(tool_mode)
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
-        output_audio_transcription={},
-        input_audio_transcription={},
+        output_audio_transcription=types.AudioTranscriptionConfig(language_codes=["pt-BR"]),
+        input_audio_transcription=types.AudioTranscriptionConfig(
+            language_codes=["pt-BR"],
+            custom_vocabulary=["Verônica", "Marcelo Moura", "MegaDesk", "HyperX", "Realtek", "Kasa"],
+        ),
         session_resumption=types.SessionResumptionConfig(
             handle=resumption_handle
         ),
@@ -539,11 +543,9 @@ class AudioLoop:
 
         self.chat_buffer = {"sender": None, "text": ""} # For aggregating chunks
         
-        # Track last transcription text to calculate deltas (Gemini sends cumulative text)
-        self._last_input_transcription = ""
-        self._last_output_transcription = ""
         self._voice_turn_text = ""
         self._assistant_turn_text = ""
+        self._transcription_turns = VoiceTranscriptionTurns(self._emit_transcription)
         self.live_session = LiveSessionState()
         self._active_tool_mode, self._tool_mode_invalid = resolve_tool_mode()
         self._cold_start_diagnostics = {}
@@ -614,9 +616,16 @@ class AudioLoop:
         if self.chat_buffer["sender"] and self.chat_buffer["text"].strip():
             self.project_manager.log_chat(self.chat_buffer["sender"], self.chat_buffer["text"])
             self.chat_buffer = {"sender": None, "text": ""}
-        # Reset transcription tracking for new turn
-        self._last_input_transcription = ""
-        self._last_output_transcription = ""
+
+    def _emit_transcription(self, event):
+        if event["role"] == "user":
+            self._voice_turn_text = event["text"]
+        else:
+            self._assistant_turn_text = event["text"]
+        if self.on_transcription:
+            self.on_transcription(event)
+        print(f"[VOICE_TRANSCRIPT] source={event['source']} kind={event['kind']} "
+              f"turn_id={event['turn_id']} chars={len(event['text'])}")
 
     def update_permissions(self, new_perms):
         print(f"[ADA DEBUG] [CONFIG] Updating tool permissions: {new_perms}")
@@ -1337,65 +1346,21 @@ class AudioLoop:
                                 self._pending_live_usage = None
                                 self._pending_retrieval_diagnostics = {}
                         if response.server_content.input_transcription:
-                            transcript = response.server_content.input_transcription.text
-                            if transcript:
-                                # Skip if this is an exact duplicate event
-                                if transcript != self._last_input_transcription:
-                                    # Calculate delta (Gemini may send cumulative or chunk-based text)
-                                    delta = transcript
-                                    if transcript.startswith(self._last_input_transcription):
-                                        delta = transcript[len(self._last_input_transcription):]
-                                    self._last_input_transcription = transcript
-                                    
-                                    # Only send if there's new text
-                                    if delta:
-                                        self._voice_turn_text += delta
-                                        # User is speaking, so interrupt model playback!
-                                        self.clear_audio_queue()
-
-                                        # Send to frontend (Streaming)
-                                        if self.on_transcription:
-                                             self.on_transcription({"sender": "User", "text": delta})
-                                        
-                                        # Buffer for Logging
-                                        if self.chat_buffer["sender"] != "User":
-                                            # Flush previous if exists
-                                            if self.chat_buffer["sender"] and self.chat_buffer["text"].strip():
-                                                self.project_manager.log_chat(self.chat_buffer["sender"], self.chat_buffer["text"])
-                                            # Start new
-                                            self.chat_buffer = {"sender": "User", "text": delta}
-                                        else:
-                                            # Append
-                                            self.chat_buffer["text"] += delta
+                            item = response.server_content.input_transcription
+                            events = self._transcription_turns.ingest(
+                                "user", item.text or "", finished=bool(item.finished)
+                            )
+                            if events:
+                                self.clear_audio_queue()
+                                self.chat_buffer = {"sender": "User", "text": events[-1]["text"]}
                         
                         if response.server_content.output_transcription:
-                            transcript = response.server_content.output_transcription.text
-                            if transcript:
-                                # Skip if this is an exact duplicate event
-                                if transcript != self._last_output_transcription:
-                                    # Calculate delta (Gemini may send cumulative or chunk-based text)
-                                    delta = transcript
-                                    if transcript.startswith(self._last_output_transcription):
-                                        delta = transcript[len(self._last_output_transcription):]
-                                    self._last_output_transcription = transcript
-                                    
-                                    # Only send if there's new text
-                                    if delta:
-                                        self._assistant_turn_text += delta
-                                        # Send to frontend (Streaming)
-                                        if self.on_transcription:
-                                             self.on_transcription({"sender": "ADA", "text": delta})
-                                        
-                                        # Buffer for Logging
-                                        if self.chat_buffer["sender"] != "ADA":
-                                            # Flush previous
-                                            if self.chat_buffer["sender"] and self.chat_buffer["text"].strip():
-                                                self.project_manager.log_chat(self.chat_buffer["sender"], self.chat_buffer["text"])
-                                            # Start new
-                                            self.chat_buffer = {"sender": "ADA", "text": delta}
-                                        else:
-                                            # Append
-                                            self.chat_buffer["text"] += delta
+                            item = response.server_content.output_transcription
+                            events = self._transcription_turns.ingest(
+                                "assistant", item.text or "", finished=bool(item.finished)
+                            )
+                            if events:
+                                self.chat_buffer = {"sender": "ADA", "text": events[-1]["text"]}
                         
                         # Flush buffer on turn completion if needed, 
                         # but usually better to wait for sender switch or explicit end.
@@ -1891,6 +1856,7 @@ class AudioLoop:
                 # Tool calls can end an intermediate receive() without ending the turn.
                 # Persist only after Gemini explicitly marks the complete turn.
                 if voice_turn_complete:
+                    self._transcription_turns.finalize_all()
                     self._process_completed_voice_turn()
                     self._process_completed_assistant_turn()
                     # Reset STT delta tracking only with the actual completed turn.

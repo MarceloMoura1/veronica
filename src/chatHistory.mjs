@@ -1,4 +1,4 @@
-export const chatSender = (role) => role === 'user' ? 'You' : role === 'assistant' ? 'VERÔNICA' : 'System';
+export const chatSender = (role) => role === 'user' ? 'MARCELO' : role === 'assistant' ? 'VERÔNICA' : 'SYSTEM';
 
 export const chatMessage = (message) => {
     const timestamp = message.timestamp || new Date().toISOString();
@@ -10,7 +10,8 @@ export const chatMessage = (message) => {
         timestamp,
         time: new Date(timestamp).toLocaleTimeString(),
         source: message.source || 'system',
-        streaming: Boolean(message.streaming)
+        streaming: Boolean(message.streaming),
+        sequence: Number.isFinite(message.sequence) ? message.sequence : null
     };
 };
 
@@ -21,7 +22,9 @@ export const mergeChatMessages = (current, incoming) => {
         byId.set(normalized.id, { ...byId.get(normalized.id), ...normalized });
     });
     return [...byId.values()].sort((left, right) =>
-        String(left.timestamp).localeCompare(String(right.timestamp)) || String(left.id).localeCompare(String(right.id))
+        String(left.timestamp).localeCompare(String(right.timestamp)) ||
+        ((left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER)) ||
+        String(left.id).localeCompare(String(right.id))
     );
 };
 

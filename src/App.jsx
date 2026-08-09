@@ -7,7 +7,7 @@ import CadWindow from './components/CadWindow';
 import BrowserWindow from './components/BrowserWindow';
 import ChatModule from './components/ChatModule';
 import ToolsModule from './components/ToolsModule';
-import { Mic, MicOff, Settings, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock } from 'lucide-react';
+import { Mic, MicOff, Settings, X, Minus, Power, Video, VideoOff, Layout, Hand, Clock } from 'lucide-react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 // MemoryPrompt removed - memory is now actively saved to project
 import ConfirmationPopup from './components/ConfirmationPopup';
@@ -18,7 +18,9 @@ import SettingsWindow from './components/SettingsWindow';
 import Sidebar, { SectionPlaceholder } from './components/Sidebar';
 import IntegrationCenter from './components/IntegrationCenter';
 import IntegrationReports from './components/IntegrationReports';
+import SystemTelemetryBar from './components/SystemTelemetryBar';
 import { chatMessage, chatSender, mergeChatMessages, newChatId } from './chatHistory.mjs';
+import { applyTranscriptionEvent } from './voiceTranscript.mjs';
 
 
 
@@ -494,18 +496,7 @@ function App() {
 
         // Handle streaming transcription without persisting partial chunks in the UI store.
         socket.on('transcription', (data) => {
-            setMessages(prev => {
-                const messageId = data.message_id || prev[prev.length - 1]?.id || newChatId();
-                const existing = prev.find(message => message.id === messageId);
-                const role = data.sender === 'User' ? 'user' : 'assistant';
-                const persisted = data.message;
-                const next = persisted ? chatMessage(persisted) : chatMessage({
-                    id: messageId, role, sender: chatSender(role), source: data.source,
-                    content: data.final ? data.text : `${existing?.text || ''}${data.text || ''}`,
-                    timestamp: existing?.timestamp || new Date().toISOString(), streaming: !data.final,
-                });
-                return mergeChatMessages(prev, [next]);
-            });
+            setMessages(prev => applyTranscriptionEvent(prev, data));
         });
 
         // Handle tool confirmation requests
@@ -1476,25 +1467,13 @@ function App() {
             />
 
             {/* Top Bar (Draggable) */}
-            <div className="z-50 flex items-center justify-between p-2 border-b border-cyan-500/20 bg-black/40 backdrop-blur-md select-none sticky top-0" style={{ WebkitAppRegion: 'drag' }}>
-                <div className="flex items-center gap-4 pl-2">
-                    <h1 className="text-xl font-bold tracking-[0.2em] text-cyan-400 drop-shadow-[0_0_10px_rgba(34,211,238,0.5)]">
-                        A.D.A
-                    </h1>
-                    <div className="text-[10px] text-cyan-700 border border-cyan-900 px-1 rounded">
-                        V2.0.0
-                    </div>
+            <div className="z-50 flex h-[49px] min-w-0 items-center border-b border-cyan-500/20 bg-black/60 backdrop-blur-md select-none sticky top-0" style={{ WebkitAppRegion: 'drag' }}>
+                <div className="flex min-w-0 flex-1 items-center pl-2">
+                    <SystemTelemetryBar socket={socket} connected={socketConnected} />
                     {/* FPS Counter */}
                     {isVideoOn && (
                         <div className="text-[10px] text-green-500 border border-green-900 px-1 rounded ml-2">
                             FPS: {fps}
-                        </div>
-                    )}
-                    {/* Connected Printers Count */}
-                    {printerCount > 0 && (
-                        <div className="flex items-center gap-1.5 text-[10px] text-green-400 border border-green-500/30 bg-green-500/10 px-2 py-0.5 rounded ml-2">
-                            <Printer size={10} className="text-green-400" />
-                            <span>{printerCount} Printer{printerCount !== 1 ? 's' : ''}</span>
                         </div>
                     )}
                     {/* Connected Smart Devices Count */}

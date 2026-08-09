@@ -74,19 +74,23 @@ def test_completed_voice_turn_emits_one_final_message_per_role():
     emitted = []
     loop = ada.AudioLoop.__new__(ada.AudioLoop)
     loop.on_transcription = emitted.append
+    loop._transcription_turns = ada.VoiceTranscriptionTurns(emitted.append)
     loop._voice_turn_text = "Pergunta final"
     loop._assistant_turn_text = "Resposta final"
-    loop._voice_message_id = "voice-id"
-    loop._assistant_message_id = "assistant-id"
     loop.conversational_memory_analyzer = Analyzer()
     loop.conversation_context_builder = SimpleNamespace(current_subject=None)
 
+    loop._transcription_turns.ingest("user", "Pergunta final")
+    loop._transcription_turns.ingest("assistant", "Resposta final")
+    partial_ids = [item["message_id"] for item in emitted]
+    emitted.clear()
+    loop._transcription_turns.finalize_all()
     loop._process_completed_voice_turn()
     loop._process_completed_assistant_turn()
 
     assert [(item["message_id"], item["final"], item["text"]) for item in emitted] == [
-        ("voice-id", True, "Pergunta final"),
-        ("assistant-id", True, "Resposta final"),
+        (partial_ids[0], True, "Pergunta final"),
+        (partial_ids[1], True, "Resposta final"),
     ]
     assert loop._voice_turn_text == loop._assistant_turn_text == ""
 

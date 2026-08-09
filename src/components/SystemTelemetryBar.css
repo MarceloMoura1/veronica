@@ -1,0 +1,18 @@
+.telemetry-bar { display: flex; min-width: 0; height: 40px; align-items: stretch; overflow: hidden; color: #cffafe; font-family: inherit; }
+.telemetry-health, .telemetry-metric { position: relative; display: flex; flex: 0 1 auto; min-width: 0; align-items: center; gap: 7px; padding: 0 13px; border-right: 1px solid rgba(34,211,238,.12); white-space: nowrap; }
+.telemetry-health { flex: 0 0 auto; gap: 8px; padding-left: 8px; color: rgba(165,243,252,.62); font-size: 8px; letter-spacing: .18em; }
+.telemetry-health span { width: 6px; height: 6px; border-radius: 50%; background: #64748b; }
+.telemetry-health--healthy span { background:#34d399; box-shadow:0 0 8px rgba(52,211,153,.75); }
+.telemetry-health--warning span { background:#facc15; box-shadow:0 0 8px rgba(250,204,21,.7); }
+.telemetry-health--critical span { background:#fb7185; box-shadow:0 0 9px rgba(251,113,133,.75); }
+.telemetry-metric__label { color: rgba(103,232,249,.48); font-size: 8px; letter-spacing: .12em; }
+.telemetry-metric strong { color: rgba(240,253,255,.92); font-size: 11px; font-weight: 600; letter-spacing: .02em; }
+.telemetry-metric .system-sparkline { width: 42px; height: 15px; margin: 0; opacity: .72; }
+.telemetry-metric .system-sparkline polyline { stroke: #22d3ee; stroke-width: 1.2; filter: drop-shadow(0 0 2px rgba(34,211,238,.4)); }
+.telemetry-metric .system-sparkline--empty { border-bottom: 1px solid rgba(34,211,238,.12); }
+.telemetry-metric:focus-visible { outline: 1px solid rgba(34,211,238,.35); outline-offset: -2px; }
+@media (max-width: 1500px) { .telemetry-metric { padding-inline: 10px; } .telemetry-metric .system-sparkline { display:none; } }
+@media (max-width: 1120px) { .telemetry-metric--disk { display:none; } .telemetry-metric { padding-inline:8px; } }
+@media (max-width: 900px) { .telemetry-metric--network { display:none; } }
+@media (max-width: 720px) { .telemetry-metric--gpu { display:none; } .telemetry-health b { display:none; } }
+@media (max-width: 520px) { .telemetry-metric--application { display:none; } }

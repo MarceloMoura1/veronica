@@ -96,7 +96,11 @@ function startPythonBackend(pythonExecutable) {
     const instanceId = crypto.randomUUID();
     const startedProcess = spawn(pythonExecutable, ['-u', scriptPath], {
         cwd: path.join(__dirname, '../backend'),
-        env: { ...process.env, ADA_BACKEND_INSTANCE_ID: instanceId },
+        env: {
+            ...process.env,
+            ADA_BACKEND_INSTANCE_ID: instanceId,
+            ADA_ELECTRON_PID: String(process.pid),
+        },
     });
     pythonProcess = startedProcess;
     pythonBackendStopped = false;

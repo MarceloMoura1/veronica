@@ -30,6 +30,7 @@ from kasa_agent import KasaAgent
 from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
 from integrations import IntegrationManager
 from chat_history import ChatHistoryStore
+from system_monitor import SystemMonitor, SystemMonitorTask
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -54,6 +55,14 @@ async def emit_integration_registry(payload):
 
 integration_manager = IntegrationManager(event_callback=emit_integration_registry)
 chat_history = ChatHistoryStore(Path(__file__).resolve().parent.parent / "data" / "conversations" / "default.jsonl")
+
+
+async def emit_system_status(payload):
+    await sio.emit("system_status", payload)
+
+
+system_monitor = SystemMonitor()
+system_monitor_task = SystemMonitorTask(system_monitor, emit_system_status, interval=1.0)
 
 import signal
 
@@ -170,6 +179,12 @@ async def startup_event():
     print("[SERVER] Startup: Initializing Kasa Agent...")
     await kasa_agent.initialize()
     await integration_manager.test_connection("gemini")
+    system_monitor_task.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await system_monitor_task.stop()
 
 @app.get("/status")
 async def status():
@@ -192,6 +207,8 @@ async def connect(sid, environ):
         {"integrations": integration_manager.list_integrations()},
         room=sid,
     )
+    if system_monitor_task.latest is not None:
+        await sio.emit("system_status", system_monitor_task.latest, room=sid)
     global authenticator
     
     # Callback for Auth Status
@@ -298,9 +315,21 @@ async def start_audio(sid, data=None):
         asyncio.create_task(sio.emit('browser_frame', data))
         
     # Callback to send Transcription data to frontend
+    transcription_lock = asyncio.Lock()
+
     def on_transcription(data):
-        # data = {"sender": "User"|"ADA", "text": "..."}
-        asyncio.create_task(sio.emit('transcription', data))
+        async def publish():
+            async with transcription_lock:
+                payload = dict(data)
+                if payload.get("final"):
+                    source = "voice" if payload["role"] == "user" else "assistant"
+                    message, _ = await asyncio.to_thread(chat_history.append, {
+                        "id": payload["message_id"], "role": payload["role"],
+                        "content": payload["text"], "timestamp": payload["timestamp"], "source": source,
+                    })
+                    payload["message"] = message
+                await sio.emit('transcription', payload)
+        asyncio.create_task(publish())
 
     # Callback to send Confirmation Request to frontend
     def on_tool_confirmation(data):
@@ -554,7 +583,7 @@ async def user_input(sid, data):
         print("[SERVER DEBUG] [Error] Audio loop is None. Cannot send text.")
         return {"accepted": False, "reason": "audio_loop_unavailable", "message": message}
 
-    if not getattr(audio_loop, "session", None):
+    if not getattr(audio_loop, "session", None) or not audio_loop.live_session_available():
         print("[SERVER DEBUG] [Error] Session is None. Cannot send text.")
         return {"accepted": False, "reason": "live_session_unavailable", "message": message}
 
@@ -600,6 +629,9 @@ async def user_input(sid, data):
             await session.send(input=model_input, end_of_turn=True)
         except Exception as error:
             print(f"[VOICE_SESSION] user_input send failed: {type(error).__name__}: {error}")
+            if audio_loop.invalidate_live_session(session=session, error=error):
+                code, reason = audio_loop._connection_error_details(error)
+                audio_loop._publish_connection_state("closed", code=code, reason=reason)
             return {"accepted": False, "reason": "live_send_failed", "message": message}
         print(f"[SERVER DEBUG] Message sent to model successfully.")
         return {"accepted": True, "message": message}

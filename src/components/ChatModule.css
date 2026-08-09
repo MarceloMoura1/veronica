@@ -9,6 +9,15 @@
 .chat-history::-webkit-scrollbar-thumb { border: 2px solid rgba(3, 15, 21, 0.72); border-radius: 999px; background: rgba(34, 211, 238, 0.68); }
 .chat-history:focus-visible { outline: 1px solid rgba(34, 211, 238, 0.58); outline-offset: 3px; }
 
+.chat-message { border-color: rgba(14, 116, 144, .5); }
+.chat-message--user { border-color: rgba(96, 165, 250, .62); }
+.chat-message--user .font-bold { color: rgb(147 197 253); }
+.chat-message--assistant { border-color: rgba(34, 211, 238, .62); }
+.chat-message--system { border-color: rgba(100, 116, 139, .4); opacity: .78; }
+.chat-message--system .font-bold { color: rgb(148 163 184); }
+.chat-message--streaming .text-gray-300 { opacity: .72; }
+.chat-message__live { margin-left: 6px; color: rgba(34,211,238,.48); font-size: 8px; letter-spacing: .12em; }
+
 .chat-history__latest {
     position: absolute;
     right: 24px;
