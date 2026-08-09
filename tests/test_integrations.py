@@ -1,4 +1,6 @@
 import asyncio
+import json
+import threading
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from types import SimpleNamespace
@@ -6,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from integrations import IntegrationEventStore, IntegrationManager, IntegrationState, TelemetryStore
+import integrations
 
 
 class FakeModels:
@@ -210,6 +213,44 @@ def test_event_store_is_isolated_by_integration(tmp_path):
     assert len(store.query("gemini")["events"]) == 1
     assert store.query("gemini")["warnings"] == []
     assert len(store.query("future")["warnings"]) == 1
+
+
+def test_event_persistence_permission_error_is_fail_open(tmp_path, monkeypatch, capsys):
+    store = IntegrationEventStore(tmp_path / "integration_events.json")
+    attempts = 0
+
+    def denied(_source, _destination):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(5, "Access denied")
+
+    monkeypatch.setattr(integrations.os, "replace", denied)
+    record = store.record(
+        integration_id="gemini", level="error", event="live_error", message="1011"
+    )
+
+    assert record["event"] == "live_error"
+    assert attempts == 3
+    assert "[TELEMETRY] persistence_failed" in capsys.readouterr().out
+
+
+def test_concurrent_event_writes_remain_valid_json(tmp_path):
+    path = tmp_path / "integration_events.json"
+    store = IntegrationEventStore(path)
+    threads = [
+        threading.Thread(
+            target=store.record,
+            kwargs={"integration_id": "gemini", "level": "info", "event": f"event-{index}", "message": "ok"},
+        )
+        for index in range(20)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert len(payload) == 20
 
 
 def test_details_and_tools_use_the_same_integration_telemetry(tmp_path):

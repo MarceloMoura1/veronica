@@ -35,25 +35,65 @@ GATEWAY_ACTIONS = {
         "create_project", "switch_project", "list_projects",
         "test_integration_connection", "get_integration_status",
         "get_integration_usage", "get_integration_reports",
+        "list_system_incidents", "get_incident_details",
     ),
+}
+
+INCIDENT_ACTION_SCHEMAS = {
+    "list_system_incidents": {
+        "type": "OBJECT", "properties": {
+            "severity": {"type": "STRING", "enum": ["grave", "medio", "leve"]},
+            "status": {"type": "STRING", "enum": ["abertos", "monitorando", "resolvido", "todos"]},
+            "period": {"type": "STRING", "enum": ["today", "7d", "30d"]},
+            "limit": {"type": "INTEGER"},
+        },
+    },
+    "get_incident_details": {
+        "type": "OBJECT", "properties": {"incident_id": {"type": "STRING"}},
+        "required": ["incident_id"],
+    },
+}
+
+DIRECT_HYBRID_TOOLS = (
+    "retrieve_memory", "list_system_incidents", "get_incident_details",
+)
+INCIDENT_TOOL_DESCRIPTIONS = {
+    "list_system_incidents": "List current system errors/incidents/health.",
+    "get_incident_details": "Get sanitized details to explain/analyze one incident.",
 }
 
 HYBRID_GATEWAY_ACTIONS = {
     "memory_admin_action": ("add_entity_alias", "add_entity_relation"),
     "engineering_action": GATEWAY_ACTIONS["engineering_action"],
     "device_action": GATEWAY_ACTIONS["device_action"],
-    "workspace_action": GATEWAY_ACTIONS["workspace_action"],
+    "workspace_action": tuple(
+        action for action in GATEWAY_ACTIONS["workspace_action"]
+        if action not in INCIDENT_ACTION_SCHEMAS
+    ),
 }
+
+
+def build_direct_incident_declarations() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "description": INCIDENT_TOOL_DESCRIPTIONS[name],
+            "parameters": INCIDENT_ACTION_SCHEMAS[name],
+        }
+        for name in DIRECT_HYBRID_TOOLS if name in INCIDENT_ACTION_SCHEMAS
+    ]
 
 READ_ONLY_ACTIONS = {
     "retrieve_memory", "discover_printers", "get_print_status",
     "list_smart_devices", "read_file", "read_directory", "list_projects",
     "test_integration_connection", "get_integration_status",
     "get_integration_usage", "get_integration_reports",
+    "list_system_incidents", "get_incident_details",
 }
 AUTO_ALLOW_ACTIONS = {
     "retrieve_memory", "test_integration_connection", "get_integration_status",
     "get_integration_usage", "get_integration_reports",
+    "list_system_incidents", "get_incident_details",
 }
 
 GATEWAY_DESCRIPTIONS = {
@@ -65,7 +105,7 @@ GATEWAY_DESCRIPTIONS = {
 HYBRID_GATEWAY_DESCRIPTIONS = {
     **GATEWAY_DESCRIPTIONS,
     "memory_admin_action": "Administrative memory writes; never use for retrieval.",
-    "workspace_action": "Workspace/current integration operations; create_project arguments JSON uses only name.",
+    "workspace_action": "Workspace/current integration operations; create_project JSON uses only name.",
 }
 
 
@@ -118,9 +158,11 @@ def resolve_tool_mode(value: str | None = None) -> tuple[str, bool]:
 def build_action_registry(declarations: Iterable[Mapping[str, Any]]) -> dict[str, ActionSpec]:
     by_name = {item["name"]: item for item in declarations}
     expected = {action for actions in GATEWAY_ACTIONS.values() for action in actions}
-    if set(by_name) != expected:
-        missing, extra = sorted(expected - set(by_name)), sorted(set(by_name) - expected)
+    legacy_expected = expected - set(INCIDENT_ACTION_SCHEMAS)
+    if set(by_name) != legacy_expected:
+        missing, extra = sorted(legacy_expected - set(by_name)), sorted(set(by_name) - legacy_expected)
         raise RuntimeError(f"Live action registry mismatch: missing={missing} extra={extra}")
+    by_name.update({name: {"name": name, "parameters": schema} for name, schema in INCIDENT_ACTION_SCHEMAS.items()})
     registry: dict[str, ActionSpec] = {}
     for domain, actions in GATEWAY_ACTIONS.items():
         for action in actions:

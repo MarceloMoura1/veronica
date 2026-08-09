@@ -18,6 +18,7 @@ import SettingsWindow from './components/SettingsWindow';
 import Sidebar, { SectionPlaceholder } from './components/Sidebar';
 import IntegrationCenter from './components/IntegrationCenter';
 import IntegrationReports from './components/IntegrationReports';
+import { chatMessage, chatSender, mergeChatMessages, newChatId } from './chatHistory.mjs';
 
 
 
@@ -304,8 +305,14 @@ function App() {
             selectedMicId,
             selectedSpeakerId
         });
-        // Only auto-connect once: when socket connected, authenticated, and devices loaded
-        if (isConnected && isAuthenticated && socketConnected && micDevices.length > 0 && !hasAutoConnectedRef.current) {
+        const selectedOutputDevice = speakerDevices.find(device => device.deviceId === selectedSpeakerId);
+        // Do not consume the one-shot auto-connect before both selected devices exist.
+        if (
+            isConnected && !isMuted && isAuthenticated && socketConnected
+            && micDevices.length > 0 && selectedMicId
+            && speakerDevices.length > 0 && selectedOutputDevice
+            && !hasAutoConnectedRef.current
+        ) {
             hasAutoConnectedRef.current = true;
 
             // Trigger Kasa and Printer Discovery
@@ -317,8 +324,7 @@ function App() {
                 const index = micDevices.findIndex(d => d.deviceId === selectedMicId);
                 const queryDevice = micDevices.find(d => d.deviceId === selectedMicId);
                 const deviceName = queryDevice ? queryDevice.label : null;
-                const outputDevice = speakerDevices.find(d => d.deviceId === selectedSpeakerId);
-                const outputDeviceName = outputDevice ? outputDevice.label : null;
+                const outputDeviceName = selectedOutputDevice.label;
                 console.log('[VOICE_BOOT] emitting start_audio', {
                     deviceName,
                     outputDeviceName,
@@ -342,6 +348,7 @@ function App() {
             setStatus('Connected');
             setSocketConnected(true);
             socket.emit('get_settings');
+            socket.emit('get_chat_history');
         });
         socket.on('disconnect', () => {
             setStatus('Disconnected');
@@ -387,6 +394,17 @@ function App() {
             if (typeof settings.camera_flipped !== 'undefined') {
                 console.log("[Settings] Camera flip set to:", settings.camera_flipped);
                 setIsCameraFlipped(settings.camera_flipped);
+            }
+            if (settings?.output_device_name) {
+                setSpeakerDevices(currentDevices => {
+                    const matches = currentDevices.filter(device => device.label === settings.output_device_name);
+                    if (matches.length > 0) {
+                        setSelectedSpeakerId(currentId =>
+                            matches.some(device => device.deviceId === currentId) ? currentId : matches[0].deviceId
+                        );
+                    }
+                    return currentDevices;
+                });
             }
         });
         socket.on('error', (data) => {
@@ -459,29 +477,34 @@ function App() {
             }
         });
 
-        // Handle streaming transcription
+        socket.on('chat_history', ({ messages: history = [] } = {}) => {
+            setMessages(current => mergeChatMessages(current, history));
+        });
+        socket.on('voice_connection', (data) => {
+            if (data.state === 'connected') {
+                setStatus('Model Connected');
+            } else if (data.state === 'reconnecting') {
+                setStatus(`Model Reconnecting (${data.attempt})`);
+            } else if (data.state === 'restarting') {
+                setStatus('Voice Restarting');
+            } else if (data.state === 'closed') {
+                setStatus('Model Disconnected');
+            }
+        });
+
+        // Handle streaming transcription without persisting partial chunks in the UI store.
         socket.on('transcription', (data) => {
             setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-
-                // If the last message is from the same sender, append the chunk
-                if (lastMsg && lastMsg.sender === data.sender) {
-                    // Create a NEW object instead of mutating (prevents React StrictMode duplication)
-                    return [
-                        ...prev.slice(0, -1),
-                        {
-                            ...lastMsg,
-                            text: lastMsg.text + data.text
-                        }
-                    ];
-                } else {
-                    // New message block
-                    return [...prev, {
-                        sender: data.sender,
-                        text: data.text,
-                        time: new Date().toLocaleTimeString()
-                    }];
-                }
+                const messageId = data.message_id || prev[prev.length - 1]?.id || newChatId();
+                const existing = prev.find(message => message.id === messageId);
+                const role = data.sender === 'User' ? 'user' : 'assistant';
+                const persisted = data.message;
+                const next = persisted ? chatMessage(persisted) : chatMessage({
+                    id: messageId, role, sender: chatSender(role), source: data.source,
+                    content: data.final ? data.text : `${existing?.text || ''}${data.text || ''}`,
+                    timestamp: existing?.timestamp || new Date().toISOString(), streaming: !data.final,
+                });
+                return mergeChatMessages(prev, [next]);
             });
         });
 
@@ -576,6 +599,9 @@ function App() {
                 microphones: audioInputs.map(d => ({ id: d.deviceId, label: d.label })),
                 speakers: audioOutputs.map(d => ({ id: d.deviceId, label: d.label }))
             });
+            socket.emit('update_settings', {
+                speaker_labels: [...new Set(audioOutputs.map(device => device.label).filter(Boolean))]
+            });
 
             // Restore saved microphone or use first available
             const savedMicId = localStorage.getItem('selectedMicId');
@@ -646,12 +672,14 @@ function App() {
             socket.off('connect');
             socket.off('disconnect');
             socket.off('status');
+            socket.off('voice_connection');
             socket.off('audio_data');
             socket.off('cad_data');
             socket.off('cad_thought');
             socket.off('cad_status');
             socket.off('browser_frame');
             socket.off('transcription');
+            socket.off('chat_history');
             socket.off('tool_confirmation_request');
             socket.off('kasa_devices');
             socket.off('printer_list');
@@ -669,6 +697,7 @@ function App() {
         if (socket.connected) {
             setStatus('Connected');
             socket.emit('get_settings');
+            socket.emit('get_chat_history');
         }
     }, []);
 
@@ -686,6 +715,14 @@ function App() {
             console.log('[Settings] Saved speaker:', selectedSpeakerId);
         }
     }, [selectedSpeakerId]);
+
+    const selectSpeaker = (deviceId) => {
+        setSelectedSpeakerId(deviceId);
+        const selected = speakerDevices.find(device => device.deviceId === deviceId);
+        if (selected?.label) {
+            socket.emit('update_settings', { output_device_name: selected.label });
+        }
+    };
 
     useEffect(() => {
         if (selectedWebcamId) {
@@ -1093,7 +1130,9 @@ function App() {
     };
 
     const addMessage = (sender, text) => {
-        setMessages(prev => [...prev, { sender, text, time: new Date().toLocaleTimeString() }]);
+        const role = sender === 'You' || sender === 'User' ? 'user' : sender === 'ADA' || sender === 'VERÔNICA' ? 'assistant' : 'system';
+        const message = chatMessage({ id: newChatId(), role, sender, content: text, timestamp: new Date().toISOString(), source: 'system' });
+        setMessages(prev => mergeChatMessages(prev, [message]));
     };
 
     const togglePower = () => {
@@ -1128,8 +1167,10 @@ function App() {
 
     const handleSend = (e) => {
         if (e.key === 'Enter' && inputValue.trim()) {
-            socket.emit('user_input', { text: inputValue });
-            addMessage('You', inputValue);
+            const text = inputValue.trim();
+            const message = chatMessage({ id: newChatId(), role: 'user', content: text, timestamp: new Date().toISOString(), source: 'text' });
+            setMessages(prev => mergeChatMessages(prev, [message]));
+            socket.emit('user_input', { text, message_id: message.id, timestamp: message.timestamp });
             setInputValue('');
         }
     };
@@ -1568,7 +1609,7 @@ function App() {
                         selectedMicId={selectedMicId}
                         setSelectedMicId={setSelectedMicId}
                         selectedSpeakerId={selectedSpeakerId}
-                        setSelectedSpeakerId={setSelectedSpeakerId}
+                        setSelectedSpeakerId={selectSpeaker}
                         selectedWebcamId={selectedWebcamId}
                         setSelectedWebcamId={setSelectedWebcamId}
                         cursorSensitivity={cursorSensitivity}

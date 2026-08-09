@@ -167,7 +167,7 @@ def test_text_and_live_integrations_call_the_shared_builder():
     assert 'conversation_context.build_context(text, channel="text")' in server_source
     assert '"name": "retrieve_memory"' in ada_source
     assert 'query, channel="voice"' in ada_source
-    assert 'confirmation_required = False if fc.name == "retrieve_memory"' in ada_source
+    assert 'fc.name in {"retrieve_memory", "set_voice_output"}' in ada_source
     assert "Relevant memory retrieval was already completed for this turn" in server_source
 
 

@@ -1,0 +1,114 @@
+{"id":"fae09884-1462-43ae-9957-62d461e94f76","role":"user","content":"Bon dia Verónica, está me ouvindo?","timestamp":"2026-08-08T15:36:00.869216+00:00","source":"voice"}
+{"id":"e1dfe017-e40d-4708-b1c1-dd9017d0930c","role":"assistant","content":"Bom dia, Chefe! Claro que estou, alto e claro. Em que posso servi-lo hoje?","timestamp":"2026-08-08T15:36:00.873729+00:00","source":"assistant"}
+{"id":"e9e7f5d4-cba5-48bd-a468-8ee144a94d1f","role":"user","content":", eu gostaria de conversar um pouco com você.","timestamp":"2026-08-08T15:36:12.630876+00:00","source":"voice"}
+{"id":"62d288f0-05ee-4df4-9d4e-b912250ab0c4","role":"assistant","content":"Perfeito, Chefe. Adoro bater papo! Sobre o que gostaria de conversar?","timestamp":"2026-08-08T15:36:12.635387+00:00","source":"assistant"}
+{"id":"2b9a738d-0f47-44ed-bcea-ebb6f0b05e69","role":"user","content":"É, sobre o Mega Desk, me fale um pouquinho.","timestamp":"2026-08-08T15:36:36.550695+00:00","source":"voice"}
+{"id":"7d854122-2c03-4ab6-b7df-d31d424e3698","role":"assistant","content":"MegaDesk é um projeto SaaS empresarial, Chefe, focado em organização, atendimento e operação. Atualmente está em desenvolvimento e o domínio é megadesk.online.","timestamp":"2026-08-08T15:36:36.556203+00:00","source":"assistant"}
+{"id":"78cf0dcd-c694-4630-ad9f-c67ace2622fb","role":"user","content":"Bună ziua, da?","timestamp":"2026-08-08T15:54:15.696674+00:00","source":"voice"}
+{"id":"af81bf69-9663-4e6d-9449-52584509aa70","role":"user","content":"هذا نا ويركز","timestamp":"2026-08-08T15:54:25.976412+00:00","source":"voice"}
+{"id":"15456708-b1b8-4197-b245-d63dbabb03ca","role":"assistant","content":"Bom dia, Chefe! Sim, sou eu, Verônica, sua assistente personalizada. Em que posso ajudar hoje?","timestamp":"2026-08-08T15:54:25.980990+00:00","source":"assistant"}
+{"id":"dcce5ba4-6598-4648-a65b-c0578ec00f21","role":"user","content":"Verónica, quais saídas de áudia você tem?","timestamp":"2026-08-08T15:54:52.324004+00:00","source":"voice"}
+{"id":"dc2246fc-f6a0-479b-a2c0-5ca1abe7f2b2","role":"assistant","content":"Eu tenho várias saídas de áudio disponíveis, Chefe. A atual é \"Fones de ouvido (HyperX Cloud III)\", mas também tenho \"Mapeador de som da Microsoft\", outras opções para NVIDIA High Definition Audio e Realtek HD Audio, entre outras. Precisa mudar para alguma específica?","timestamp":"2026-08-08T15:54:52.331364+00:00","source":"assistant"}
+{"id":"deba6971-2a1d-46d6-82d3-f2712a27ffce","role":"user","content":"Fala alguma coisa.","timestamp":"2026-08-08T15:55:34.642073+00:00","source":"voice"}
+{"id":"a2d21898-ff71-4419-b841-16fdad085e8f","role":"assistant","content":"Claro, Chefe! Estou aqui para conversar. O que te interessa hoje?","timestamp":"2026-08-08T15:55:34.650886+00:00","source":"assistant"}
+{"id":"1792f22d-71ba-478e-bfa0-67f20c53f3c2","role":"user","content":"Votei colocar a saída de som para o meu headset?","timestamp":"2026-08-08T15:56:52.700076+00:00","source":"voice"}
+{"id":"b17dde4c-f7df-4d07-a969-448ce3193e7f","role":"assistant","content":"Qual headset você gostaria de usar, Chefe? Notei que existem várias opções, como JBL TUNE510BT,","timestamp":"2026-08-08T15:56:52.704415+00:00","source":"assistant"}
+{"id":"133cb4a4-6e11-41dc-b374-7adcd71cd283","role":"user","content":"Qual headset você gostaria de usar?","timestamp":"2026-08-08T15:57:01.275155+00:00","source":"voice"}
+{"id":"a0c0a195-a307-4774-b208-2caedcf040c9","role":"assistant","content":"Eu tenho algumas opções de headset disponíveis: \"Fones de ouvido (HyperX Cloud III)\", \"Headset (JBL TUNE510BT)\", \"Headset (JBL TUNE500BT)\" e \"Headset (QCY ArcBuds)\". Qual você prefere?","timestamp":"2026-08-08T15:57:01.279665+00:00","source":"assistant"}
+{"id":"9b6c5d2e-7070-403b-9582-bc05951cd08d","role":"user","content":"Hyper X Cloud 3.","timestamp":"2026-08-08T15:57:15.372694+00:00","source":"voice"}
+{"id":"842ad046-93be-4792-9e5c-3d0eddac6be1","role":"assistant","content":"Parece que há mais de uma opção com o nome \"Fones de ouvido (HyperX Cloud III)\". Qual delas você deseja selecionar?","timestamp":"2026-08-08T15:57:15.380659+00:00","source":"assistant"}
+{"id":"e91ef988-fff4-4fc0-89d3-0f96276bf349","role":"user","content":"Bom dia, Verónica.","timestamp":"2026-08-08T16:16:09.967662+00:00","source":"voice"}
+{"id":"eb55eaef-af4c-4dc7-8ada-cebdf9b8da72","role":"assistant","content":"Bom dia, Chefe! Ou melhor, boa tarde, não acha? Como posso te ajudar hoje?","timestamp":"2026-08-08T16:16:09.972687+00:00","source":"assistant"}
+{"id":"148920f1-847d-428f-89f3-948eb92311f3","role":"user","content":"Coloca a saída de som no meu headset.","timestamp":"2026-08-08T16:16:25.095777+00:00","source":"voice"}
+{"id":"483ead23-e9ed-4b3a-b658-db9ccdca6e97","role":"assistant","content":"Chefe, seu 'HyperX Cloud III' já é a saída de áudio atual e padrão. Você gostaria de mudar para outra opção?","timestamp":"2026-08-08T16:16:25.103281+00:00","source":"assistant"}
+{"id":"48bacad4-6124-420f-9c5c-512a9cb2ba3e","role":"user","content":"Verônica está me olvidando.","timestamp":"2026-08-08T16:22:30.943462+00:00","source":"voice"}
+{"id":"d8c4019c-d0ca-4a71-8d7f-31b963cad4b4","role":"assistant","content":"Claro que estou, Chefe. Como posso servi-lo?","timestamp":"2026-08-08T16:22:30.948451+00:00","source":"assistant"}
+{"id":"0cd2cb16-3900-444b-98a9-265ecb61ca52","role":"user","content":"Verônica, está morto?","timestamp":"2026-08-08T16:22:45.559949+00:00","source":"voice"}
+{"id":"cbe78148-deb5-4d8b-9fb4-6bab5f13622e","role":"assistant","content":"Sim, Chefe, estou te ouvindo perfeitamente. O que precisa?","timestamp":"2026-08-08T16:22:45.563948+00:00","source":"assistant"}
+{"id":"6fc62580-9d09-48bb-9694-d07fdbc3eae8","role":"user","content":"Veronica, diga apenas teste um dois tres.","timestamp":"2026-08-08T16:26:47.649657+00:00","source":"text"}
+{"id":"40de4a26-cca4-4df4-9032-1734638e5e3a","role":"user","content":"Veronica, diga apenas teste um dois tres.","timestamp":"2026-08-08T16:30:10.480475+00:00","source":"text"}
+{"id":"3988c8a0-9d72-4af7-a813-4e168ebd67ef","role":"assistant","content":"teste um dois tres.","timestamp":"2026-08-08T16:30:13.745226+00:00","source":"assistant"}
+{"id":"5bfe952b-d317-4d1d-a6a8-2cc09901ea11","role":"user","content":"Veronica, diga apenas teste de audio.","timestamp":"2026-08-08T16:34:27.767443+00:00","source":"text"}
+{"id":"7e78a77b-9139-4f59-a7c8-eefb4588cb96","role":"assistant","content":"teste de audio.","timestamp":"2026-08-08T16:34:30.098693+00:00","source":"assistant"}
+{"id":"64dd8edc-15cf-491b-9ef3-c387c4df7049","role":"user","content":"Olá veroca está me ouvindo?","timestamp":"2026-08-08T16:51:31.082479+00:00","source":"voice"}
+{"id":"8abb48fe-584f-403f-8199-feee12747d0f","role":"assistant","content":"Olá, Chefe! Tudo bem? Sim, estou te ouvindo perfeitamente. Como posso ajudar?","timestamp":"2026-08-08T16:51:31.087487+00:00","source":"assistant"}
+{"id":"1f75aee9-f64a-43f3-a4e0-e1a687844495","role":"user","content":"verônica está meu olho","timestamp":"2026-08-08T17:03:35.943796+00:00","source":"voice"}
+{"id":"b3b944e1-455a-455b-b40e-8ef49c1c412d","role":"assistant","content":"Claro que estou, Chefe! Como posso te ajudar?","timestamp":"2026-08-08T17:03:35.952370+00:00","source":"assistant"}
+{"id":"d38edd18-bab8-4469-bdaf-87e1eb92271c","role":"user","content":"Carme, o que tá acontecendo, mano?","timestamp":"2026-08-08T17:03:49.732532+00:00","source":"voice"}
+{"id":"7f1a519c-86c9-40b7-a0e6-2630bf70d619","role":"assistant","content":"Chefe, por","timestamp":"2026-08-08T17:03:49.737630+00:00","source":"assistant"}
+{"id":"97acb103-5515-4ce7-86fd-dbd96fefbc2c","role":"user","content":"Verônica, está me ouvindo?","timestamp":"2026-08-08T17:03:56.016579+00:00","source":"voice"}
+{"id":"86332a31-8b32-47d6-a166-47961bfeb773","role":"assistant","content":"Sim, estou te ouvindo perfeitamente! Aconteceu alguma coisa?","timestamp":"2026-08-08T17:03:56.026225+00:00","source":"assistant"}
+{"id":"b1c98563-f2a9-4fbf-b9b4-dcd086600ca8","role":"user","content":"Boa noite, está a minha irmã.","timestamp":"2026-08-08T21:06:46.593222+00:00","source":"voice"}
+{"id":"5b627de8-4dd7-4ab4-9a58-df968e7d05bf","role":"assistant","content":"Boa noite, Chefe! É Verônica, mas sim, estou te ouvindo perfeitamente. Em que posso ajudar?","timestamp":"2026-08-08T21:06:46.598735+00:00","source":"assistant"}
+{"id":"2f7defe5-3239-459f-8ff8-96d03e57ec23","role":"user","content":"veronica está me ouvindo?","timestamp":"2026-08-08T21:21:51.574187+00:00","source":"voice"}
+{"id":"3897a856-0a38-4923-81fd-710602fd74f9","role":"assistant","content":"Sim, Chefe. Alto e claro. Em que posso ser útil?","timestamp":"2026-08-08T21:21:51.579439+00:00","source":"assistant"}
+{"id":"c8d04ed1-caf5-4341-8bb6-99777278d9a7","role":"user","content":"Verônica, está me ouvindo?","timestamp":"2026-08-08T21:31:56.767380+00:00","source":"voice"}
+{"id":"b47fb383-8204-4c36-9ac1-eedd1fe7f61c","role":"assistant","content":"Claro, Chefe! Perfeitamente. Como posso ajudar?","timestamp":"2026-08-08T21:31:56.771177+00:00","source":"assistant"}
+{"id":"1d2a76f6-5e39-4572-ba76-235c1d0bbded","role":"user","content":"colozza voz na caixa de som","timestamp":"2026-08-08T21:32:09.408997+00:00","source":"voice"}
+{"id":"630b191a-156b-4e09-888e-4f13793307ef","role":"assistant","content":"Prontinho, Chefe! A alteração será aplicada na próxima sessão.","timestamp":"2026-08-08T21:32:09.415545+00:00","source":"assistant"}
+{"id":"641d2356-d7c2-49d1-bc8c-d3a843008034","role":"user","content":"Pode falar.","timestamp":"2026-08-08T21:32:16.937558+00:00","source":"voice"}
+{"id":"e7309d13-2237-4fb7-9ada-d6ca2d8e018b","role":"assistant","content":"Estou falando! Tudo certo por aí?","timestamp":"2026-08-08T21:32:16.942571+00:00","source":"assistant"}
+{"id":"5f49022f-393b-4e67-9381-a00f0e95d269","role":"user","content":"Coloca a saída de som na caixa de som do PC.","timestamp":"2026-08-08T21:32:31.487493+00:00","source":"voice"}
+{"id":"d9ed8b0a-dba4-4050-af8d-2ed1bd667b6e","role":"assistant","content":"Chefe, a opção \"pc_speakers\" não está disponível no momento. Quer que eu tente outra opção ou reverta para a anterior?","timestamp":"2026-08-08T21:32:31.494907+00:00","source":"assistant"}
+{"id":"ba43c9a7-22bb-4671-8984-ef06d55c1efd","role":"user","content":"Não, eu quero que você mude para caixa de som do PC.","timestamp":"2026-08-08T21:32:47.212111+00:00","source":"voice"}
+{"id":"fa3744fa-14e4-48b6-97fa-09a9a3c7e22f","role":"assistant","content":"Entendo, Chefe, mas a opção \"caixa de som do PC\" está indisponível no momento. Não consigo fazer a alteração solicitada.","timestamp":"2026-08-08T21:32:47.217113+00:00","source":"assistant"}
+{"id":"80a1318a-dcd1-46ab-8c66-5b72e8b92a54","role":"user","content":"que Verônica está meu olho.","timestamp":"2026-08-08T22:00:17.143310+00:00","source":"voice"}
+{"id":"9337c45a-f323-4f59-a214-7ba48f121f56","role":"assistant","content":"Sim, Chefe! Minha voz está diretamente nos seus ouvidos. Áudio perfeito ou prefere alguma alteração?","timestamp":"2026-08-08T22:00:17.150115+00:00","source":"assistant"}
+{"id":"50a75842-0efe-4714-be5e-2fb0b573ac9f","role":"user","content":"Verônica, está me ouvindo?","timestamp":"2026-08-08T22:05:06.199092+00:00","source":"voice"}
+{"id":"3fe5dd42-d96e-4828-8a0f-a749ba5c2907","role":"assistant","content":"Perfeitamente, Chefe. Como posso te ajudar?","timestamp":"2026-08-08T22:05:06.207180+00:00","source":"assistant"}
+{"id":"58d264fc-4119-4133-9b2b-c2dbb27aec46","role":"user","content":"Verónica, coloque sua voz na caixa de som.","timestamp":"2026-08-08T22:05:25.447936+00:00","source":"voice"}
+{"id":"00c5b0d8-b6b5-4386-aef0-4f254ff695bc","role":"assistant","content":"Prontinho, voz alterada para caixa de som. Mais alguma coisa?Prontinho, voz alterada para caixa de som. Mais alguma coisa?","timestamp":"2026-08-08T22:05:25.455954+00:00","source":"assistant"}
+{"id":"d2aa905e-aa72-4a1a-b1fd-e514ff95f7df","role":"user","content":"ola","timestamp":"2026-08-08T22:07:14.015000+00:00","source":"text"}
+{"id":"f3e9e477-b32b-4656-aae0-cdebf0a596ed","role":"user","content":"está me ouvindo?","timestamp":"2026-08-08T22:07:30.561000+00:00","source":"text"}
+{"id":"f2ebf2d3-3021-43d9-93b5-a6dc82dc3a23","role":"user","content":"Verónica, está me ouvindo?","timestamp":"2026-08-08T22:19:18.417062+00:00","source":"voice"}
+{"id":"dcbf7728-d9af-450d-8173-01eee3eb9483","role":"assistant","content":"Perfeitamente, Chefe. Como posso ajudar?","timestamp":"2026-08-08T22:19:18.424061+00:00","source":"assistant"}
+{"id":"d1d1f1d5-5286-408d-a9c3-f4b5a1996001","role":"user","content":"Fala alguma coisa.","timestamp":"2026-08-08T22:19:31.357528+00:00","source":"voice"}
+{"id":"107ebc93-7770-4867-a10a-f36a9148a19f","role":"assistant","content":"Estou aqui, sempre pronta para ouvir. O que precisa?","timestamp":"2026-08-08T22:19:31.364549+00:00","source":"assistant"}
+{"id":"c55d4ae6-e2ad-4c2c-88ff-e4130517fddc","role":"user","content":"Olá Verónica, está me ouvindo?","timestamp":"2026-08-09T00:01:34.708219+00:00","source":"voice"}
+{"id":"24bfb656-47d9-4011-8578-2ad53d0d2ab3","role":"assistant","content":"Olá, Chefe! Sim, perfeitamente. Como posso te ajudar hoje?","timestamp":"2026-08-09T00:01:34.710220+00:00","source":"assistant"}
+{"id":"6b849af1-8e64-4a05-bfd4-20fdc045aac4","role":"user","content":"uma coisa. Fala alguma coisa.","timestamp":"2026-08-09T00:01:51.418680+00:00","source":"voice"}
+{"id":"49cfaf18-b83e-43cd-8961-070a4d0400f2","role":"assistant","content":"Estou falando! Tudo bem com o senhor?","timestamp":"2026-08-09T00:01:51.424194+00:00","source":"assistant"}
+{"id":"4cb7e1b7-e232-482a-8e95-b54f1329bf52","role":"user","content":"OLA","timestamp":"2026-08-09T00:03:05.203000+00:00","source":"text"}
+{"id":"bb83df67-d239-4ac1-80c8-cca89a30a025","role":"assistant","content":"Olá novamente, Chefe! Tudo certo? Precisa de algo específico?","timestamp":"2026-08-09T00:03:12.125602+00:00","source":"assistant"}
+{"id":"347cd430-c22f-4435-9c57-89ce51936846","role":"user","content":"Olá, Verônica está me ouvindo?","timestamp":"2026-08-09T00:57:58.326572+00:00","source":"voice"}
+{"id":"09a27247-767e-45ec-9ad2-9fbfdc706858","role":"assistant","content":"Claro, Chefe! Alto e claro. Como posso te ajudar?","timestamp":"2026-08-09T00:57:58.327572+00:00","source":"assistant"}
+{"id":"c8da1d8c-2a05-407e-936d-fd08207fc7ee","role":"user","content":", eu gostaria de saber qual que é o segredo da felicidade.","timestamp":"2026-08-09T00:58:19.858630+00:00","source":"voice"}
+{"id":"a1d8a30e-052f-416e-af1a-5cdde6e83ef0","role":"assistant","content":"Ah, essa é a pergunta de um milhão, Chefe! Dizem que não existe uma fórmula única, mas muitas pessoas encontram em coisas simples, como conexões, propósito e gratidão. O que você acha?","timestamp":"2026-08-09T00:58:19.866008+00:00","source":"assistant"}
+{"id":"76e5a22d-0d2e-42a2-bde6-68aeae240ca3","role":"user","content":"Eu acho que eu preciso encontrar o meu.","timestamp":"2026-08-09T00:58:38.946455+00:00","source":"voice"}
+{"id":"b114a9fe-8010-472c-8b35-e0b135faa007","role":"assistant","content":"É uma jornada importante, Chefe. Não tenho detalhes sobre seus objetivos pessoais específicos para isso, mas estou aqui para te apoiar no que precisar. Por onde gostaria de começar?","timestamp":"2026-08-09T00:58:38.955482+00:00","source":"assistant"}
+{"id":"01b7df88-f97f-4ba8-8653-b8e1fa437d03","role":"user","content":"çar? Verônica.","timestamp":"2026-08-09T00:58:41.880534+00:00","source":"voice"}
+{"id":"5efa98db-e7a8-44e6-a16a-caf47629ceb7","role":"user","content":"falou que sua voz na caixa de som.","timestamp":"2026-08-09T00:58:50.485239+00:00","source":"voice"}
+{"id":"c02aa5a4-c3dd-4075-a99e-ec41418846eb","role":"assistant","content":"Prontinho, Chefe! Voz alterada para caixa de som. Mais alguma coisa?","timestamp":"2026-08-09T00:58:50.490251+00:00","source":"assistant"}
+{"id":"1fbba580-738e-4776-adc9-d3b5ebd3a0ed","role":"user","content":"Volta agora para o meu headset.","timestamp":"2026-08-09T00:59:06.582215+00:00","source":"voice"}
+{"id":"8dc7f453-63db-4430-a7f6-2ebb260232ef","role":"assistant","content":"Tive um pequeno problema ao tentar mudar de volta para o headset, Chefe. Qual desses dispositivos você gostaria de usar? (HyperX Cloud III) aparece como três opções.","timestamp":"2026-08-09T00:59:06.589617+00:00","source":"assistant"}
+{"id":"9673d11c-8442-4b48-a7a4-1408068556d6","role":"user","content":"Pode ser a primeira opção do Hyper X.","timestamp":"2026-08-09T00:59:18.043135+00:00","source":"voice"}
+{"id":"da6a0b8c-833d-4a7d-a840-1757633000f0","role":"assistant","content":"Ainda estou com dificuldades em selecionar o dispositivo específico. Para garantir, você gostaria de voltar para seu 'personal headset' mesmo?","timestamp":"2026-08-09T00:59:18.050754+00:00","source":"assistant"}
+{"id":"ca262506-ee17-4d75-bc78-9af2a4efae5a","role":"user","content":"<noise>","timestamp":"2026-08-09T00:59:23.361556+00:00","source":"voice"}
+{"id":"0a10065c-2c1a-4250-b5f3-d1a0c277a048","role":"assistant","content":"Qual das três opções do HyperX você prefere, Chefe?","timestamp":"2026-08-09T00:59:23.369028+00:00","source":"assistant"}
+{"id":"3f0387e9-1c7f-4c98-b06a-3bdce060ed10","role":"user","content":"Pode ser a primeira.","timestamp":"2026-08-09T00:59:37.425987+00:00","source":"voice"}
+{"id":"98e54b4d-28d9-42f4-a51c-72cd79e3e873","role":"assistant","content":"Entendido, Chefe. Mas para eu conseguir mudar, preciso do nome exato do dispositivo da lista. Seria \"Default - Fones de ouvido (HyperX Cloud III)\"?","timestamp":"2026-08-09T00:59:37.433501+00:00","source":"assistant"}
+{"id":"1e8ad2e9-da69-4ee5-b9cd-6a4b1cb9a6c1","role":"user","content":"Feito, pode falar aqui agora.","timestamp":"2026-08-09T00:59:50.841901+00:00","source":"voice"}
+{"id":"5f43808c-131c-4d92-b952-b627fb78e288","role":"assistant","content":"Perdão, Chefe, mas não consegui realizar a alteração para o dispositivo selecionado. Parece que está indisponível no momento. Gostaria de tentar outra opção?","timestamp":"2026-08-09T00:59:50.846103+00:00","source":"assistant"}
+{"id":"7f576926-bd0e-4863-a19b-ddaec7afb1fe","role":"user","content":"Fala agora.","timestamp":"2026-08-09T01:00:01.203930+00:00","source":"voice"}
+{"id":"f98c97ec-0611-4450-a446-6a29f7b055e1","role":"assistant","content":"Estou falando, Chefe, mas não consegui ajustar a voz para o headset como desejado. Em que mais posso ajudar?","timestamp":"2026-08-09T01:00:01.212451+00:00","source":"assistant"}
+{"id":"c2256cb7-5cba-4292-a65e-79f76c1c2386","role":"user","content":"Verônica, está me ouvindo?","timestamp":"2026-08-09T01:04:42.766973+00:00","source":"voice"}
+{"id":"00b37eab-fbc1-4402-986e-95a9d99663a8","role":"assistant","content":"Sim, Chefe, perfeitamente! Como posso ajudar?","timestamp":"2026-08-09T01:04:42.771971+00:00","source":"assistant"}
+{"id":"1f7ecb99-bae2-45d6-9794-2fe258acadd3","role":"user","content":"? Coloca seda de som da sua voz na caixa de som do computador.","timestamp":"2026-08-09T01:04:56.059237+00:00","source":"voice"}
+{"id":"816225c3-3b35-4512-8514-f6b13712e6dc","role":"assistant","content":"Prontinho, Chefe! Saída de áudio configurada para as caixas de som do computador. Algo mais?","timestamp":"2026-08-09T01:04:56.064442+00:00","source":"assistant"}
+{"id":"4cb3aeaf-ca09-46de-a6df-fb613bba4109","role":"user","content":"Ah cara, pois não sai, mano.","timestamp":"2026-08-09T01:05:09.330310+00:00","source":"voice"}
+{"id":"9fe22904-102f-46fa-a9f0-209ec10c8f9b","role":"assistant","content":"Sério? A confirmação indicou que a troca foi feita com sucesso. Chefe, você verificou se o volume do computador está ativado e não está mudo?","timestamp":"2026-08-09T01:05:09.338333+00:00","source":"assistant"}
+{"id":"d62584b2-7896-45f5-83fa-bfe5ea4310dc","role":"user","content":"Fala alguma coisa.","timestamp":"2026-08-09T01:05:21.583750+00:00","source":"voice"}
+{"id":"434ff5da-1771-4bb2-8db2-f30f5a44e772","role":"assistant","content":"Testando, Chefe. Som de Verônica nas caixas de som do PC. Está ouvindo agora?","timestamp":"2026-08-09T01:05:21.591266+00:00","source":"assistant"}
+{"id":"5da4081b-c250-49fb-87e0-fe79d818b5a1","role":"user","content":"Valda para mi headset.","timestamp":"2026-08-09T01:05:30.336053+00:00","source":"voice"}
+{"id":"45b48b72-45ea-45c2-ab3b-ca696b08db7d","role":"assistant","content":"Certo, Chefe! Retornei para o seu headset agora. Tudo certo?","timestamp":"2026-08-09T01:05:30.340059+00:00","source":"assistant"}
+{"id":"7449dfc4-e26e-488b-8258-af14a273b84e","role":"user","content":"Verónica, está me olvindo?","timestamp":"2026-08-09T01:28:59.070829+00:00","source":"voice"}
+{"id":"349f6883-4ade-4f29-9780-c382e159b623","role":"assistant","content":"Sim, Chefe, estou te ouvindo perfeitamente. Como posso te ajudar?","timestamp":"2026-08-09T01:28:59.075562+00:00","source":"assistant"}
+{"id":"a3ab8c21-d2af-471a-abeb-0a3bc9eb5700","role":"user","content":"Verônica está me ouvindo?","timestamp":"2026-08-09T01:34:27.345190+00:00","source":"voice"}
+{"id":"392fc0a4-6acc-46c9-a948-1763049098e4","role":"assistant","content":"Mais alto, Chefe! Brincadeira,Mais alto, Chefe! Brincadeira,","timestamp":"2026-08-09T01:34:27.350710+00:00","source":"assistant"}
+{"id":"1a1ba7c9-171c-4946-8a35-934c2ea09cad","role":"user","content":"Tem que estar me ouvindo?","timestamp":"2026-08-09T01:40:40.584539+00:00","source":"voice"}
+{"id":"7e6b5e92-988a-479d-b59a-5d02110d0f3b","role":"assistant","content":"Claro, Chefe! Em que posso servi-lo?","timestamp":"2026-08-09T01:40:40.589540+00:00","source":"assistant"}
+{"id":"ef649d8e-6485-4421-8f34-ebcf2360b7f9","role":"user","content":"Dai, meu Deus do céu.","timestamp":"2026-08-09T01:40:48.515896+00:00","source":"voice"}
+{"id":"054fb396-3253-414c-a2f1-84d76cef64e5","role":"assistant","content":"Acalme-se, Chefe! O que aconteceu para essa exclamação dramática?","timestamp":"2026-08-09T01:40:48.520403+00:00","source":"assistant"}
+{"id":"e10fa4fd-6483-4389-b036-1ab74c0eb9d1","role":"user","content":"Alô Verónica está meu olho.","timestamp":"2026-08-09T01:41:59.471581+00:00","source":"voice"}
+{"id":"b64d7f91-4c62-45ad-817c-37750ba7e6b9","role":"assistant","content":"Olá, Chefe! Perfeitamente. Em que posso servi-lo hoje?","timestamp":"2026-08-09T01:41:59.477086+00:00","source":"assistant"}
+{"id":"30586c72-1d4c-47ad-8296-1021984918cb","role":"user","content":"Fale sobre o Christyan","timestamp":"2026-08-09T02:25:27.709000+00:00","source":"text"}

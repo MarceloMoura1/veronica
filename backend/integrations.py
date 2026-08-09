@@ -14,10 +14,11 @@ import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Callable
 
 from dotenv import load_dotenv
+from incidents import IncidentDispatcher, IncidentService, IncidentStore
 
 STATUS_ACTIVE = "active"
 STATUS_INACTIVE = "inactive"
@@ -156,7 +157,14 @@ class TelemetryStore:
                 json.dump(records[-self.max_records :], handle, ensure_ascii=False, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, self.path)
+            for attempt in range(3):
+                try:
+                    os.replace(temp_name, self.path)
+                    break
+                except PermissionError:
+                    if attempt == 2:
+                        raise
+                    sleep(0.05 * (attempt + 1))
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
@@ -221,7 +229,13 @@ class TelemetryStore:
         with self._lock:
             records = self._read()
             records.append(record)
-            self._write(records)
+            try:
+                self._write(records)
+            except OSError as error:
+                print(
+                    f"[TELEMETRY] persistence_failed path={self.path} "
+                    f"error={type(error).__name__}: {_safe_error(error)}"
+                )
         return record
 
     @staticmethod
@@ -395,7 +409,13 @@ class IntegrationEventStore:
         with self._lock:
             records = self._read()
             records.append(record)
-            TelemetryStore(self.path, self.max_records)._write(records)
+            try:
+                TelemetryStore(self.path, self.max_records)._write(records)
+            except OSError as error:
+                print(
+                    f"[TELEMETRY] persistence_failed path={self.path} "
+                    f"error={type(error).__name__}: {_safe_error(error)}"
+                )
         return record
 
     def query(self, integration_id: str, limit: int = 20) -> dict[str, list[dict[str, Any]]]:
@@ -421,6 +441,7 @@ class IntegrationManager:
         telemetry_path: Path | None = None,
         events_path: Path | None = None,
         preferences_path: Path | None = None,
+        incidents_path: Path | None = None,
         env_path: Path | None = None,
         api_key: str | None = None,
         client_factory: Callable[[str], Any] | None = None,
@@ -442,6 +463,10 @@ class IntegrationManager:
         self.events = IntegrationEventStore(
             events_path or project_root / "data" / "telemetry" / "integration_events.json"
         )
+        self.incidents = IncidentService(IncidentStore(
+            incidents_path or project_root / "data" / "telemetry" / "incidents.json"
+        ))
+        self.incident_dispatcher = IncidentDispatcher(self.incidents)
         self.preferences_path = Path(
             preferences_path or project_root / "data" / "telemetry" / "integration_preferences.json"
         )
@@ -555,6 +580,18 @@ class IntegrationManager:
             "reports": self.events.query(integration_id, limit=limit),
         }
 
+    def list_system_incidents(self, **filters) -> dict[str, Any]:
+        return self.incidents.list_system_incidents(**filters)
+
+    def get_incident_details(self, incident_id: str) -> dict[str, Any]:
+        return self.incidents.get_incident_details(incident_id)
+
+    def tool_list_system_incidents(self, **filters) -> dict[str, Any]:
+        return self.incidents.list_system_incidents_for_llm(**filters)
+
+    def tool_get_incident_details(self, incident_id: str) -> dict[str, Any]:
+        return self.incidents.get_incident_details_for_llm(incident_id)
+
     async def _notify(self) -> None:
         if not self._event_callback:
             return
@@ -639,6 +676,12 @@ class IntegrationManager:
                 usage_metadata=None,
             )
             self._record_event(integration_id, "error", "connection_test", state.last_error)
+            self.incident_dispatcher.submit(
+                source="gemini", component="integration_connection", category="integration",
+                error_code=error.__class__.__name__, title="Falha na conexao com Gemini",
+                safe_summary=state.last_error, severity="medio",
+                metadata={"exception_class": error.__class__.__name__, "operation": "connection_test"},
+            )
         await self._notify()
         return self.get_status(integration_id)
 
@@ -661,6 +704,12 @@ class IntegrationManager:
         state.last_error = self._redact_error(error) if self._api_key else None
         if state.last_error:
             self._record_event(integration_id, "error", "live_error", state.last_error)
+            self.incident_dispatcher.submit(
+                source="gemini", component="gemini_live", category="provider_error",
+                error_code=getattr(error, "code", error.__class__.__name__), title="Gemini Live indisponivel",
+                safe_summary=state.last_error, severity="medio",
+                metadata={"exception_class": error.__class__.__name__, "operation": "live_session"},
+            )
         await self._notify()
 
     def record_usage(
@@ -693,8 +742,19 @@ class IntegrationManager:
             "request",
             f"{request_type}: {'sucesso' if success else 'erro'}",
         )
+        outcome = (diagnostics or {}).get("tool_outcome")
+        if not success and outcome != "confirmation_denied":
+            self.incident_dispatcher.submit(
+                source=integration_id, component=(diagnostics or {}).get("gateway", request_type),
+                category=outcome or "provider_error", error_code=(diagnostics or {}).get("reason_code", request_type),
+                title=f"Falha operacional em {request_type}", safe_summary="Falha operacional registrada pela telemetria.",
+                metadata=diagnostics or {}, event_type=outcome or "error",
+            )
         self._notify_soon()
         return record
+
+    def shutdown(self) -> None:
+        self.incident_dispatcher.shutdown(flush=True)
 
     async def update_api_key(self, api_key: str) -> dict[str, Any]:
         key = (api_key or "").strip()

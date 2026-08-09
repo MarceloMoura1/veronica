@@ -115,3 +115,45 @@ def test_real_mldev_converter_serializes_context_compression_without_enterprise_
         "sliding_window": {"target_tokens": 3000},
     }
     assert "transparent" not in json.dumps(request).lower()
+
+
+def test_1011_invalidates_old_live_session_reference():
+    class ClosedError(RuntimeError):
+        code = 1011
+
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    session = object()
+    loop.session = session
+    loop._connection_active = True
+
+    code, reason = loop._connection_error_details(
+        ExceptionGroup("connection failed", [ClosedError("Internal error encountered")])
+    )
+    invalidated = loop.invalidate_live_session(session=session, error=ClosedError())
+
+    assert code == 1011
+    assert "Internal error encountered" in reason
+    assert invalidated is True
+    assert loop.session is None
+    assert loop.live_session_available() is False
+
+
+def test_stale_session_cannot_invalidate_new_connection():
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    old_session = object()
+    new_session = object()
+    loop.session = new_session
+    loop._connection_active = True
+
+    assert loop.invalidate_live_session(session=old_session, error=RuntimeError("late")) is False
+    assert loop.session is new_session
+    assert loop.live_session_available() is True
+
+
+def test_existing_reconnect_loop_owns_one_task_set_per_connection():
+    source = Path(ada.__file__).read_text(encoding="utf-8")
+    run_source = source[source.index("    async def run(self, start_message=None):"):]
+    assert "while not self.stop_event.is_set():" in run_source
+    assert "retry_delay = min(retry_delay * 2, 10)" in run_source
+    assert run_source.count('tg.create_task(self.listen_audio(), name="voice_input")') == 1
+    assert run_source.count('tg.create_task(self.play_audio(), name="voice_output")') == 1

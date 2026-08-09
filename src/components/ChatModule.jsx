@@ -1,4 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
+import { ArrowDown } from 'lucide-react';
+import './ChatModule.css';
+import { isNearChatBottom } from '../chatScroll.mjs';
 
 const ChatModule = ({
     messages,
@@ -12,14 +15,32 @@ const ChatModule = ({
     height,
     onMouseDown
 }) => {
-    const messagesEndRef = useRef(null);
+    const messagesRef = useRef(null);
+    const isNearBottomRef = useRef(true);
+    const [hasUnreadBelow, setHasUnreadBelow] = useState(false);
 
-    const scrollToBottom = () => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const scrollToBottom = (behavior = 'smooth') => {
+        const element = messagesRef.current;
+        if (!element) return;
+        element.scrollTo({ top: element.scrollHeight, behavior });
+        isNearBottomRef.current = true;
+        setHasUnreadBelow(false);
     };
 
-    useEffect(() => {
-        scrollToBottom();
+    const handleScroll = () => {
+        const element = messagesRef.current;
+        if (!element) return;
+        const nearBottom = isNearChatBottom(element);
+        isNearBottomRef.current = nearBottom;
+        if (nearBottom) setHasUnreadBelow(false);
+    };
+
+    useLayoutEffect(() => {
+        if (isNearBottomRef.current) {
+            scrollToBottom(messages.length ? 'smooth' : 'auto');
+        } else {
+            setHasUnreadBelow(true);
+        }
     }, [messages]);
 
     return (
@@ -41,17 +62,22 @@ const ChatModule = ({
             <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-5 pointer-events-none mix-blend-overlay"></div>
 
             <div
-                className="flex flex-col gap-3 overflow-y-auto mb-4 scrollbar-hide mask-image-gradient relative z-10"
+                ref={messagesRef}
+                onScroll={handleScroll}
+                tabIndex={0}
+                aria-label="Histórico da conversa"
+                className="chat-history flex flex-col gap-3 overflow-y-auto mb-4 relative z-10"
                 style={{ height: height ? `calc(${height}px - 70px)` : '15rem' }}
             >
-                {messages.slice(-5).map((msg, i) => (
-                    <div key={i} className="text-sm border-l-2 border-cyan-800/50 pl-3 py-1">
+                {messages.map((msg) => (
+                    <div key={msg.id} className="text-sm border-l-2 border-cyan-800/50 pl-3 py-1">
                         <span className="text-cyan-600 font-mono text-xs opacity-70">[{msg.time}]</span> <span className="font-bold text-cyan-300 drop-shadow-sm">{msg.sender}</span>
                         <div className="text-gray-300 mt-1 leading-relaxed">{msg.text}</div>
                     </div>
                 ))}
-                <div ref={messagesEndRef} />
             </div>
+
+            {hasUnreadBelow && <button type="button" className="chat-history__latest" onClick={() => scrollToBottom()}><ArrowDown size={14} /> Mensagens recentes</button>}
 
             <div className="flex gap-2 relative z-10 absolute bottom-4 left-6 right-6">
                 <input

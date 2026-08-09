@@ -1319,7 +1319,7 @@ class AudioLoop:
                         self.audio_in_queue.put_nowait(data)
                         if not self._voice_receive_audio_logged:
                             self._voice_receive_audio_logged = True
-                            print(f"[VOICE_RECEIVE] first audio received bytes={len(data)}")
+                            print(f"[VOICE_RECEIVE] first_audio_bytes={len(data)}")
                         # NOTE: 'continue' removed here to allow processing transcription/tools in same packet
 
                     # 2. Handle Transcription (User & Model)
@@ -1939,6 +1939,7 @@ class AudioLoop:
                 output_device_index=resolved_output_device_index,
             )
             print(f"[VOICE_OUTPUT] output opened index={resolved_output_device_index}")
+            print(f"[VOICE_OUTPUT] stream_open=success active={stream.is_active()}")
             while True:
                 bytestream = await self.audio_in_queue.get()
                 if self.on_audio_data:
@@ -1946,7 +1947,7 @@ class AudioLoop:
                 await asyncio.to_thread(stream.write, bytestream)
                 if not self._voice_output_logged:
                     self._voice_output_logged = True
-                    print(f"[VOICE_OUTPUT] first chunk played bytes={len(bytestream)}")
+                    print(f"[VOICE_OUTPUT] first_write_bytes={len(bytestream)}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

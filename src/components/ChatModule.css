@@ -1,0 +1,31 @@
+.chat-history {
+    overscroll-behavior: contain;
+    scrollbar-color: rgba(34, 211, 238, 0.68) rgba(3, 15, 21, 0.72);
+    scrollbar-width: thin;
+}
+
+.chat-history::-webkit-scrollbar { width: 8px; }
+.chat-history::-webkit-scrollbar-track { border-radius: 999px; background: rgba(3, 15, 21, 0.72); }
+.chat-history::-webkit-scrollbar-thumb { border: 2px solid rgba(3, 15, 21, 0.72); border-radius: 999px; background: rgba(34, 211, 238, 0.68); }
+.chat-history:focus-visible { outline: 1px solid rgba(34, 211, 238, 0.58); outline-offset: 3px; }
+
+.chat-history__latest {
+    position: absolute;
+    right: 24px;
+    bottom: 72px;
+    z-index: 20;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border: 1px solid rgba(34, 211, 238, 0.46);
+    border-radius: 999px;
+    color: rgb(207 250 254);
+    background: rgb(3 18 25 / 0.96);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+}
+.chat-history__latest:hover,
+.chat-history__latest:focus-visible { outline: none; border-color: rgb(34 211 238); background: rgb(6 36 46); }

@@ -14,7 +14,9 @@ import threading
 import sys
 import os
 import json
-from datetime import datetime
+import uuid
+import platform
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -27,6 +29,7 @@ from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, PersonalMemoryManager
 from integrations import IntegrationManager
+from chat_history import ChatHistoryStore
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -50,12 +53,14 @@ async def emit_integration_registry(payload):
 
 
 integration_manager = IntegrationManager(event_callback=emit_integration_registry)
+chat_history = ChatHistoryStore(Path(__file__).resolve().parent.parent / "data" / "conversations" / "default.jsonl")
 
 import signal
 
 # --- SHUTDOWN HANDLER ---
 def signal_handler(sig, frame):
     print(f"\n[SERVER] Caught signal {sig}. Exiting gracefully...")
+    integration_manager.shutdown()
     # Clean up audio loop
     if audio_loop:
         try:
@@ -73,12 +78,22 @@ signal.signal(signal.SIGTERM, signal_handler)
 # Global state
 audio_loop = None
 loop_task = None
+printer_monitor_task = None
 authenticator = None
 kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
-personal_memory = PersonalMemoryManager()
-conversation_context = ConversationContextBuilder(personal_memory)
-conversational_memory = ConversationalMemoryAnalyzer(personal_memory, conversation_context)
+personal_memory = None
+conversation_context = None
+conversational_memory = None
+
+
+def initialize_runtime_memory(storage_dir=None):
+    """Initialize mutable conversation state only during real startup or with injected test storage."""
+    global personal_memory, conversation_context, conversational_memory
+    personal_memory = PersonalMemoryManager(storage_dir)
+    conversation_context = ConversationContextBuilder(personal_memory)
+    conversational_memory = ConversationalMemoryAnalyzer(personal_memory, conversation_context)
+    return personal_memory, conversation_context, conversational_memory
 
 DEFAULT_SETTINGS = {
     "face_auth_enabled": False, # Default OFF as requested
@@ -94,7 +109,9 @@ DEFAULT_SETTINGS = {
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
-    "camera_flipped": False # Invert cursor horizontal direction
+    "camera_flipped": False, # Invert cursor horizontal direction
+    "output_device_name": None,
+    "speaker_labels": [],
 }
 
 SETTINGS = DEFAULT_SETTINGS.copy()
@@ -108,6 +125,8 @@ def load_settings():
                 # Merge with defaults to ensure new keys exist
                 # Deep merge for tool_permissions would be better but shallow merge of top keys + tool_permissions check is okay for now
                 for k, v in loaded.items():
+                    if k in {"audio_output_id", "audio_output_name", "audio_output_aliases"}:
+                        continue
                     if k == "tool_permissions" and isinstance(v, dict):
                          SETTINGS["tool_permissions"].update(v)
                     else:
@@ -127,6 +146,7 @@ def save_settings():
 # Load on startup
 load_settings()
 
+
 authenticator = None
 kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
 # tool_permissions is now SETTINGS["tool_permissions"]
@@ -136,6 +156,7 @@ async def startup_event():
     import sys
     print(f"[SERVER DEBUG] Startup Event Triggered")
     print(f"[SERVER DEBUG] Python Version: {sys.version}")
+    print(f"[SERVER DEBUG] Python Executable: {sys.executable}", flush=True)
     try:
         loop = asyncio.get_running_loop()
         print(f"[SERVER DEBUG] Running Loop: {type(loop)}")
@@ -144,13 +165,23 @@ async def startup_event():
     except Exception as e:
         print(f"[SERVER DEBUG] Error checking loop: {e}")
 
+    if personal_memory is None:
+        initialize_runtime_memory()
     print("[SERVER] Startup: Initializing Kasa Agent...")
     await kasa_agent.initialize()
     await integration_manager.test_connection("gemini")
 
 @app.get("/status")
 async def status():
-    return {"status": "running", "service": "A.D.A Backend"}
+    return {
+        "status": "running",
+        "service": "A.D.A Backend",
+        "backend_version": "1.0",
+        "instance_id": os.getenv("ADA_BACKEND_INSTANCE_ID"),
+        "pid": os.getpid(),
+        "python_executable": sys.executable,
+        "python_version": platform.python_version(),
+    }
 
 @sio.event
 async def connect(sid, environ):
@@ -161,7 +192,6 @@ async def connect(sid, environ):
         {"integrations": integration_manager.list_integrations()},
         room=sid,
     )
-
     global authenticator
     
     # Callback for Auth Status
@@ -201,6 +231,7 @@ async def connect(sid, environ):
 async def disconnect(sid):
     print(f"Client disconnected: {sid}")
 
+
 @sio.event
 async def start_audio(sid, data=None):
     global audio_loop, loop_task
@@ -225,6 +256,13 @@ async def start_audio(sid, data=None):
             device_name = data['device_name']
         if 'output_device_name' in data:
             output_device_name = data['output_device_name']
+
+    if not output_device_name:
+        output_device_name = SETTINGS.get("output_device_name")
+        print(
+            "[VOICE_SERVER] start_audio missing output label; "
+            f"using persisted output_device_name={output_device_name!r}"
+        )
             
     print(
         f"[VOICE_SERVER] device_name={device_name!r} browser_index={device_index!r} "
@@ -411,6 +449,25 @@ async def monitor_printers_loop():
             
         await asyncio.sleep(2) # Update every 2 seconds for responsiveness
 
+async def _stop_voice_session(*, emit_status=True):
+    global audio_loop, loop_task
+    stopping_loop, stopping_task = audio_loop, loop_task
+    if not stopping_loop and not stopping_task:
+        return
+    if stopping_loop:
+        stopping_loop.stop()
+    if stopping_task and not stopping_task.done():
+        stopping_task.cancel()
+    if stopping_task:
+        await asyncio.gather(stopping_task, return_exceptions=True)
+    if audio_loop is stopping_loop:
+        audio_loop = None
+    if loop_task is stopping_task:
+        loop_task = None
+    if emit_status:
+        await sio.emit('status', {'msg': 'A.D.A Stopped'})
+
+
 @sio.event
 async def stop_audio(sid):
     global audio_loop
@@ -484,14 +541,24 @@ async def shutdown(sid, data=None):
 async def user_input(sid, data):
     text = data.get('text')
     print(f"[SERVER DEBUG] User input received: '{text}'")
-    
+
+    if not isinstance(text, str) or not text.strip():
+        return {"accepted": False, "reason": "empty_text"}
+
+    message, _ = await asyncio.to_thread(chat_history.append, {
+        "id": data.get("message_id"), "role": "user", "content": text,
+        "timestamp": data.get("timestamp"), "source": "text",
+    })
+
     if not audio_loop:
         print("[SERVER DEBUG] [Error] Audio loop is None. Cannot send text.")
-        return
+        return {"accepted": False, "reason": "audio_loop_unavailable", "message": message}
 
-    if not audio_loop.session:
+    if not getattr(audio_loop, "session", None):
         print("[SERVER DEBUG] [Error] Session is None. Cannot send text.")
-        return
+        return {"accepted": False, "reason": "live_session_unavailable", "message": message}
+
+    session = audio_loop.session
 
     if text:
         print(f"[SERVER DEBUG] Sending message to model: '{text}'")
@@ -525,12 +592,25 @@ async def user_input(sid, data):
             print(f"[SERVER DEBUG] Piggybacking video frame with text input.")
             try:
                 # Send frame first
-                await audio_loop.session.send(input=audio_loop._latest_image_payload, end_of_turn=False)
+                await session.send(input=audio_loop._latest_image_payload, end_of_turn=False)
             except Exception as e:
                 print(f"[SERVER DEBUG] Failed to send piggyback frame: {e}")
                 
-        await audio_loop.session.send(input=model_input, end_of_turn=True)
+        try:
+            await session.send(input=model_input, end_of_turn=True)
+        except Exception as error:
+            print(f"[VOICE_SESSION] user_input send failed: {type(error).__name__}: {error}")
+            return {"accepted": False, "reason": "live_send_failed", "message": message}
         print(f"[SERVER DEBUG] Message sent to model successfully.")
+        return {"accepted": True, "message": message}
+
+
+@sio.event
+async def get_chat_history(sid, data=None):
+    messages = await asyncio.to_thread(chat_history.list_messages)
+    payload = {"messages": messages}
+    await sio.emit("chat_history", payload, room=sid)
+    return payload
 
 import json
 from datetime import datetime
@@ -1015,6 +1095,19 @@ async def update_settings(sid, data):
         SETTINGS["camera_flipped"] = data["camera_flipped"]
         print(f"[SERVER] Camera flip set to: {data['camera_flipped']}")
 
+    if "speaker_labels" in data and isinstance(data["speaker_labels"], list):
+        SETTINGS["speaker_labels"] = list(dict.fromkeys(
+            str(label).strip() for label in data["speaker_labels"] if str(label).strip()
+        ))
+
+    if "output_device_name" in data:
+        requested_name = data["output_device_name"]
+        if requested_name in SETTINGS.get("speaker_labels", []):
+            SETTINGS["output_device_name"] = requested_name
+            print(f"[SPEAKER_BASELINE] source=ui output_device_name={requested_name!r} applies=next_session")
+        else:
+            print(f"[SPEAKER_BASELINE] source=ui rejected unknown output_device_name={requested_name!r}")
+
     save_settings()
     # Broadcast new full settings
     await sio.emit('settings', SETTINGS)
@@ -1099,6 +1192,56 @@ async def get_integration_reports(sid, data=None):
             {"message": str(error)[:300]},
             room=sid,
         )
+
+
+@sio.event
+async def list_system_incidents(sid, data=None):
+    request = data or {}
+    payload = integration_manager.list_system_incidents(
+        severity=request.get("severity"), status=request.get("status", "abertos"),
+        period=request.get("period"),
+    )
+    await sio.emit("system_incidents", payload, room=sid)
+
+
+@sio.event
+async def get_incident_details(sid, data=None):
+    payload = integration_manager.get_incident_details((data or {}).get("incident_id", ""))
+    await sio.emit("incident_details", payload, room=sid)
+
+
+def build_incident_model_input(incident):
+    """Build a bounded operational context without personal-memory content."""
+    fields = (
+        "incident_id", "severity", "source", "component", "error_code", "safe_summary",
+        "status", "occurrence_count", "first_seen", "last_seen", "diagnosis",
+    )
+    context = {key: incident.get(key) for key in fields if incident.get(key) is not None}
+    return (
+        "System Notification: explain this authoritative sanitized operational incident. "
+        "Separate OBSERVED FACTS from CAUSE HYPOTHESES; never invent absent evidence.\n"
+        + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+@sio.event
+async def ask_veronica_about_incident(sid, data=None):
+    if not audio_loop or not audio_loop.session:
+        return {"accepted": False, "reason": "live_session_unavailable"}
+    raw_id = (data or {}).get("incident_id")
+    try:
+        incident_id = str(uuid.UUID(str(raw_id)))
+    except (ValueError, TypeError, AttributeError):
+        return {"accepted": False, "reason": "invalid_incident_id"}
+    result = integration_manager.tool_get_incident_details(incident_id)
+    incident = result.get("incident")
+    if not incident:
+        return {"accepted": False, "reason": "incident_not_found"}
+    try:
+        await audio_loop.session.send(input=build_incident_model_input(incident), end_of_turn=True)
+    except Exception:
+        return {"accepted": False, "reason": "live_send_failed"}
+    return {"accepted": True, "incident_id": incident_id}
 
 
 @sio.event

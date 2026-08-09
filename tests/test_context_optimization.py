@@ -67,7 +67,7 @@ def test_tool_contracts_survive_compaction():
     assert by_name["generate_cad"]["behavior"] == "NON_BLOCKING"
     assert "add_entity_relation" not in str(ada.config.system_instruction)
     source = (Path(__file__).parents[1] / "backend" / "ada.py").read_text(encoding="utf-8")
-    assert 'confirmation_required = False if fc.name == "retrieve_memory" else self.permissions.get(fc.name, True)' in source
+    assert 'fc.name in {"retrieve_memory", "set_voice_output"}' in source
 
 
 def test_live_history_has_bounded_progressive_compression():

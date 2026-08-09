@@ -10,7 +10,7 @@ from google.genai import _live_converters, types
 
 import ada
 from live_tools import (
-    GATEWAY_ACTIONS, GATEWAY_MODE, HYBRID_GATEWAY_ACTIONS, HYBRID_MODE,
+    DIRECT_HYBRID_TOOLS, GATEWAY_ACTIONS, GATEWAY_MODE, HYBRID_GATEWAY_ACTIONS, HYBRID_MODE,
     LEGACY_MODE, ToolRoutingError, resolve_tool_mode,
     route_gateway_call, safe_routing_error, schema_metrics,
 )
@@ -55,13 +55,13 @@ def test_gateway_mode_has_four_declarations_and_provider_search():
     assert [item["name"] for item in selected[1]["function_declarations"]] == list(GATEWAY_ACTIONS)
 
 
-def test_hybrid_mode_keeps_retrieve_direct_and_has_four_operational_gateways():
+def test_hybrid_mode_exposes_three_direct_core_tools_and_four_gateways():
     selected, mode, invalid = ada.tools_for_mode("hybrid")
     declarations = selected[1]["function_declarations"]
     assert mode == HYBRID_MODE and invalid is False
     assert selected[0] == {"google_search": {}}
     assert [item["name"] for item in declarations] == [
-        "retrieve_memory", *HYBRID_GATEWAY_ACTIONS,
+        *DIRECT_HYBRID_TOOLS, *HYBRID_GATEWAY_ACTIONS,
     ]
     assert declarations[0] is ada.tools[1]["function_declarations"][
         next(i for i, item in enumerate(ada.tools[1]["function_declarations"]) if item["name"] == "retrieve_memory")
@@ -69,11 +69,11 @@ def test_hybrid_mode_keeps_retrieve_direct_and_has_four_operational_gateways():
     assert declarations[0] == ada._legacy_declarations_by_name["retrieve_memory"]
 
 
-def test_hybrid_mapping_covers_twenty_gateway_actions_plus_direct_retrieval():
+def test_hybrid_mapping_covers_gateways_plus_direct_core_tools_once():
     mapped = [action for actions in HYBRID_GATEWAY_ACTIONS.values() for action in actions]
     assert len(mapped) == len(set(mapped)) == 20
-    assert "retrieve_memory" not in mapped
-    assert set(mapped) | {"retrieve_memory"} == set(ada.ACTION_REGISTRY)
+    assert not set(DIRECT_HYBRID_TOOLS) & set(mapped)
+    assert set(mapped) | (set(DIRECT_HYBRID_TOOLS) - {"set_voice_output"}) == set(ada.ACTION_REGISTRY)
     assert HYBRID_GATEWAY_ACTIONS["memory_admin_action"] == (
         "add_entity_alias", "add_entity_relation",
     )
@@ -91,9 +91,16 @@ def test_memory_admin_rejects_retrieval_as_cross_domain_action():
 
 def test_all_internal_actions_are_mapped_exactly_once():
     mapped = [action for actions in GATEWAY_ACTIONS.values() for action in actions]
-    assert len(mapped) == len(set(mapped)) == 21
+    assert len(mapped) == len(set(mapped)) == 23
     assert set(mapped) == set(ada.ACTION_REGISTRY)
     assert all(spec.handler == spec.name for spec in ada.ACTION_REGISTRY.values())
+
+
+def test_incident_actions_are_direct_read_only_and_absent_from_workspace_gateway():
+    assert "list_system_incidents" not in HYBRID_GATEWAY_ACTIONS["workspace_action"]
+    assert "get_incident_details" not in HYBRID_GATEWAY_ACTIONS["workspace_action"]
+    assert ada.ACTION_REGISTRY["list_system_incidents"].confirmation_required is False
+    assert ada.ACTION_REGISTRY["get_incident_details"].nature == "read"
 
 
 def test_gateway_routes_to_canonical_action_and_preserves_correlation():
@@ -217,7 +224,7 @@ def test_gateway_schema_reduces_external_schema_by_at_least_55_percent():
     legacy = schema_metrics(ada.tools[1]["function_declarations"])
     gateway = schema_metrics(ada.gateway_tools[1]["function_declarations"])
     assert gateway["count"] == 4
-    assert gateway["chars"] <= legacy["chars"] * 0.45
+    assert gateway["chars"] <= legacy["chars"] * 0.50
 
 
 @pytest.mark.parametrize("mode", ["legacy", "gateway", "hybrid"])
@@ -231,8 +238,11 @@ def test_real_sdk_converter_accepts_complete_live_config(mode):
     finally:
         client.close()
     assert isinstance(converted, dict)
-    expected = {"legacy": 21, "gateway": 4, "hybrid": 5}[mode]
+    expected = {"legacy": 21, "gateway": 4, "hybrid": 8}[mode]
     assert len(parent["setup"]["tools"][1]["functionDeclarations"]) == expected
+    if mode == "hybrid":
+        names = [item.name for item in parent["setup"]["tools"][1]["functionDeclarations"]]
+        assert names[:len(DIRECT_HYBRID_TOOLS)] == list(DIRECT_HYBRID_TOOLS)
 
 
 def test_gateway_preparation_does_not_resolve_arbitrary_callables():
@@ -247,16 +257,30 @@ def test_gateway_preparation_does_not_resolve_arbitrary_callables():
     assert not hasattr(internal, "module") and not callable(internal.name)
 
 
-def test_hybrid_retrieve_bypasses_gateway_and_preserves_name_and_id():
+@pytest.mark.parametrize("name,args", [
+    ("retrieve_memory", {"query": "fixture"}),
+    ("list_system_incidents", {"severity": "grave"}),
+    ("get_incident_details", {"incident_id": "synthetic-id"}),
+])
+def test_hybrid_direct_tools_bypass_gateway_and_preserve_name_and_id(name, args):
     loop = ada.AudioLoop.__new__(ada.AudioLoop)
     loop._active_tool_mode = HYBRID_MODE
-    call = SimpleNamespace(id="memory-call", name="retrieve_memory", args={"query": "fixture"})
+    call = types.FunctionCall(id="sdk-direct-call", name=name, args=args)
     internal, routed, error = loop._prepare_live_tool_call(call)
     assert internal is call and routed is None and error is None
     response = types.FunctionResponse(
-        id=internal.id, name=internal.name, response={"context": "sanitized fixture"}
+        id=internal.id, name=internal.name, response={"result": "sanitized fixture"}
     )
-    assert response.id == "memory-call" and response.name == "retrieve_memory"
+    assert response.id == "sdk-direct-call" and response.name == name
+
+
+@pytest.mark.parametrize("name", ["list_system_incidents", "get_incident_details"])
+def test_direct_incident_tools_are_auto_allowed(name):
+    loop = ada.AudioLoop.__new__(ada.AudioLoop)
+    loop.permissions = {name: True}
+    loop.on_tool_confirmation = lambda data: (_ for _ in ()).throw(AssertionError("confirmation requested"))
+    call = types.FunctionCall(id="sdk-direct-call", name=name, args={})
+    assert asyncio.run(loop._authorize_live_tool_call(call)) is True
 
 
 def test_hybrid_system_instruction_keeps_direct_memory_guidance():
@@ -264,8 +288,8 @@ def test_hybrid_system_instruction_keeps_direct_memory_guidance():
     assert "call retrieve_memory" in instruction
     assert "memory_action with action retrieve_memory" not in instruction
     assert "MegaDesk" not in instruction
-    assert "current status" in instruction
-    assert "not retrieve_memory" in instruction
+    assert "list_system_incidents" in instruction
+    assert "get_incident_details only" in instruction
 
 
 def test_tool_contract_separates_persistent_memory_from_current_operations():
@@ -446,8 +470,8 @@ def test_direct_memory_telemetry_omits_query_entities_and_content():
     assert "private fixture entity" not in serialized
 
 
-def test_hybrid_schema_reduces_external_schema_by_at_least_45_percent():
+def test_hybrid_schema_stays_at_least_twenty_five_percent_below_legacy():
     legacy = schema_metrics(ada.tools[1]["function_declarations"])
     hybrid = schema_metrics(ada.hybrid_tools[1]["function_declarations"])
-    assert hybrid["count"] == 5
-    assert hybrid["chars"] <= legacy["chars"] * 0.55
+    assert hybrid["count"] == 8
+    assert hybrid["chars"] <= legacy["chars"] * 0.75

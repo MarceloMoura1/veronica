@@ -4,7 +4,7 @@
   "description": "A.D.A V2 - AI Assistant",
   "main": "electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && npx electron .\"",
+    "dev": "node electron/assertDevPortAvailable.js && concurrently -k \"vite --strictPort\" \"wait-on tcp:5173 && npx electron .\"",
     "build": "vite build",
     "start": "npx electron ."
   },
