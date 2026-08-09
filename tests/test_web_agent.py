@@ -5,7 +5,8 @@ import pytest
 import asyncio
 import os
 
-from web_agent import WebAgent
+from web_agent import WebAgent, classify_web_error
+from google.genai import types
 
 
 class TestWebAgentInit:
@@ -50,27 +51,25 @@ class TestCoordinateDenormalization:
 class TestWebBrowserLaunch:
     """Test browser launching capabilities."""
     
-    @pytest.mark.asyncio
     @pytest.mark.skipif(
         not os.getenv("GEMINI_API_KEY"),
         reason="GEMINI_API_KEY not set"
     )
-    async def test_browser_launch_headless(self):
+    def test_browser_launch_headless(self):
         """Test launching browser in headless mode."""
-        try:
+        async def scenario():
             from playwright.async_api import async_playwright
-            
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                await page.goto("https://www.google.com")
-                
-                title = await page.title()
-                print(f"Page title: {title}")
-                assert "Google" in title
-                
-                await browser.close()
-                print("Browser launch test passed")
+                try:
+                    page = await browser.new_page()
+                    await page.goto("https://www.google.com")
+                    title = await page.title()
+                    assert "Google" in title
+                finally:
+                    await browser.close()
+        try:
+            asyncio.run(scenario())
         except Exception as e:
             pytest.skip(f"Playwright not available: {e}")
 
@@ -78,23 +77,20 @@ class TestWebBrowserLaunch:
 class TestWebNavigation:
     """Test web navigation capabilities."""
     
-    @pytest.mark.asyncio
-    async def test_navigate_to_url(self):
+    def test_navigate_to_url(self):
         """Test navigating to a URL."""
-        try:
+        async def scenario():
             from playwright.async_api import async_playwright
-            
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                
-                await page.goto("https://example.com")
-                content = await page.content()
-                
-                assert "Example Domain" in content
-                print("Navigation test passed")
-                
-                await browser.close()
+                try:
+                    page = await browser.new_page()
+                    await page.goto("https://example.com")
+                    assert "Example Domain" in await page.content()
+                finally:
+                    await browser.close()
+        try:
+            asyncio.run(scenario())
         except Exception as e:
             pytest.skip(f"Playwright not available: {e}")
 
@@ -102,25 +98,22 @@ class TestWebNavigation:
 class TestWebScreenshot:
     """Test screenshot capabilities."""
     
-    @pytest.mark.asyncio
-    async def test_capture_screenshot(self, temp_dir):
+    def test_capture_screenshot(self, temp_dir):
         """Test capturing a screenshot."""
-        try:
+        async def scenario():
             from playwright.async_api import async_playwright
-            
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
-                
-                await page.goto("https://example.com")
-                
-                screenshot_path = temp_dir / "test_screenshot.png"
-                await page.screenshot(path=str(screenshot_path))
-                
-                assert screenshot_path.exists()
-                print(f"Screenshot saved to: {screenshot_path}")
-                
-                await browser.close()
+                try:
+                    page = await browser.new_page()
+                    await page.goto("https://example.com")
+                    screenshot_path = temp_dir / "test_screenshot.png"
+                    await page.screenshot(path=str(screenshot_path))
+                    assert screenshot_path.exists()
+                finally:
+                    await browser.close()
+        try:
+            asyncio.run(scenario())
         except Exception as e:
             pytest.skip(f"Playwright not available: {e}")
 
@@ -128,12 +121,11 @@ class TestWebScreenshot:
 class TestWebAgentTask:
     """Test full web agent task execution."""
     
-    @pytest.mark.asyncio
     @pytest.mark.skipif(
         not os.getenv("GEMINI_API_KEY"),
         reason="GEMINI_API_KEY not set"
     )
-    async def test_simple_web_task(self):
+    def test_simple_web_task(self):
         """Test running a simple web task."""
         agent = WebAgent()
         
@@ -143,16 +135,11 @@ class TestWebAgentTask:
             updates.append({"log": log_text})
             print(f"Update: {log_text[:100]}...")
         
-        try:
-            result = await agent.run_task(
-                prompt="Navigate to example.com and tell me the page title",
-                update_callback=update_callback
-            )
-            
-            print(f"Task result: {result}")
-            print(f"Updates received: {len(updates)}")
-        except Exception as e:
-            print(f"Task failed: {e}")
+        result = asyncio.run(agent.run_task(
+            prompt="Navigate to example.com and tell me the page title",
+            update_callback=update_callback
+        ))
+        assert "ok" in result
 
 
 class TestPlaywrightInstallation:
@@ -166,15 +153,89 @@ class TestPlaywrightInstallation:
         except ImportError:
             pytest.skip("Playwright not installed")
     
-    @pytest.mark.asyncio
-    async def test_playwright_browsers(self):
+    def test_playwright_browsers(self):
         """Test if Playwright browsers are installed."""
-        try:
+        async def scenario():
             from playwright.async_api import async_playwright
-            
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 await browser.close()
-                print("Chromium browser is available")
+        try:
+            asyncio.run(scenario())
         except Exception as e:
             pytest.skip(f"Playwright browsers not installed: {e}")
+
+
+def test_errors_are_classified_without_secrets_or_raw_objects():
+    assert classify_web_error(RuntimeError("429 RESOURCE_EXHAUSTED quota"))["code"] == "provider_quota_exhausted"
+    assert classify_web_error(RuntimeError("browser executable doesn't exist; run install"))["code"] == "browser_not_installed"
+    assert classify_web_error(TimeoutError("navigation timeout"))["code"] == "navigation_timeout"
+    assert classify_web_error(PermissionError("Access is denied"))["code"] == "permission_error"
+
+
+def test_run_task_returns_serializable_failure_and_cleans_resources(monkeypatch):
+    closed = []
+
+    class Resource:
+        async def close(self): closed.append(True)
+
+    agent = WebAgent()
+    agent.context, agent.browser = Resource(), Resource()
+
+    async def fail(*_args):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED quota")
+
+    monkeypatch.setattr(agent, "_run_task", fail)
+    result = asyncio.run(agent.run_task("fixture"))
+    assert result["ok"] is False
+    assert result["error"]["code"] == "provider_quota_exhausted"
+    assert len(closed) == 2
+    assert agent.browser is agent.context is agent.page is None
+
+
+def test_run_task_returns_serializable_success(monkeypatch):
+    agent = WebAgent()
+
+    async def succeed(*_args): return "Example Domain"
+
+    monkeypatch.setattr(agent, "_run_task", succeed)
+    result = asyncio.run(agent.run_task("fixture"))
+    assert result["ok"] is True and result["result"] == "Example Domain"
+
+
+def test_execute_actions_preserves_call_id_and_rejects_unknown_action():
+    agent = WebAgent()
+    call = types.FunctionCall(id="call-123", name="unknown_action", args={})
+    results = asyncio.run(agent.execute_function_calls([call]))
+    assert results == [("call-123", "unknown_action", {
+        "error": {"code": "unsupported_action", "retryable": False}
+    })]
+
+
+def test_function_response_is_correlated_and_contains_sanitized_state():
+    class Page:
+        url = "https://example.com/"
+        async def screenshot(self, **_kwargs): return b"png"
+
+    agent = WebAgent()
+    agent.page = Page()
+    responses, screenshot = asyncio.run(agent.get_function_responses([
+        ("call-123", "navigate", {"status": "ok"})
+    ]))
+    assert screenshot == b"png"
+    assert responses[0].id == "call-123" and responses[0].name == "navigate"
+    assert responses[0].response == {"url": "https://example.com/", "status": "ok"}
+
+
+def test_web_agent_tool_is_declared_and_gateway_routable():
+    import ada
+    from live_tools import route_gateway_call
+    declarations = {item["name"]: item for item in ada.tools[1]["function_declarations"]}
+    assert declarations["run_web_agent"]["parameters"]["required"] == ["prompt"]
+    routed = route_gateway_call(
+        "workspace_action", "outer-call",
+        {"action": "run_web_agent", "arguments": '{"prompt":"Open example.com"}'},
+        ada.ACTION_REGISTRY,
+    )
+    assert routed.canonical_name == "run_web_agent"
+    assert routed.call_id == "outer-call"

@@ -19,6 +19,25 @@ SCREEN_WIDTH = 1440
 SCREEN_HEIGHT = 900
 # UPDATED: Use the specific Computer Use preview model
 MODEL_ID = "gemini-2.5-computer-use-preview-10-2025"
+NAVIGATION_TIMEOUT_MS = 20_000
+
+
+def classify_web_error(error):
+    message = str(error)
+    lowered = message.casefold()
+    if "resource_exhausted" in lowered or "quota" in lowered or "429" in lowered:
+        code = "provider_quota_exhausted"
+    elif "executable doesn't exist" in lowered or "browser_type.launch" in lowered and "install" in lowered:
+        code = "browser_not_installed"
+    elif "timeout" in lowered:
+        code = "navigation_timeout"
+    elif "name resolution" in lowered or "dns" in lowered or "net::err" in lowered:
+        code = "network_error"
+    elif isinstance(error, PermissionError) or "access is denied" in lowered or "acesso negado" in lowered:
+        code = "permission_error"
+    else:
+        code = "web_agent_unavailable"
+    return {"code": code, "type": type(error).__name__, "message": message[:600]}
 
 class WebAgent:
     def __init__(self):
@@ -32,6 +51,56 @@ class WebAgent:
 
     def denormalize_y(self, y: int, height: int) -> int:
         return int((y / 1000) * height)
+
+    async def smoke_test(self, url="https://example.com"):
+        """Verify browser launch/navigation/extraction without calling Gemini."""
+        started = time.perf_counter()
+        print("[WEB_AGENT] state=starting mode=smoke_test")
+        try:
+            async with async_playwright() as p:
+                print("[WEB_AGENT] state=browser_launch")
+                browser = await p.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    print(f"[WEB_AGENT] state=navigate url={url}")
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+                    result = {"ok": True, "url": page.url, "status": response.status if response else None,
+                              "title": await page.title(), "text": (await page.locator("body").inner_text())[:4000]}
+                    print(f"[WEB_AGENT] state=success elapsed_ms={round((time.perf_counter()-started)*1000)}")
+                    return result
+                finally:
+                    await browser.close()
+        except Exception as error:
+            detail = classify_web_error(error)
+            print(f"[WEB_AGENT] state=error stage=smoke_test error_type={detail['type']} code={detail['code']}")
+            return {"ok": False, "error": detail}
+
+    async def run_task(self, prompt, update_callback=None):
+        """Run Computer Use with classified errors and guaranteed browser cleanup."""
+        started = time.perf_counter()
+        print("[WEB_AGENT] state=starting mode=computer_use")
+        try:
+            result = await self._run_task(prompt, update_callback)
+            payload = {"ok": True, "result": str(result)[:12000],
+                       "elapsed_ms": round((time.perf_counter() - started) * 1000)}
+            print(f"[WEB_AGENT] state=success elapsed_ms={payload['elapsed_ms']}")
+            return payload
+        except Exception as error:
+            detail = classify_web_error(error)
+            print(f"[WEB_AGENT] state=error stage=run_task error_type={detail['type']} code={detail['code']}")
+            if update_callback:
+                await update_callback(None, f"Web Agent error: {detail['code']}")
+            return {"ok": False, "error": detail,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000)}
+        finally:
+            for resource in (self.context, self.browser):
+                if resource is not None:
+                    try:
+                        await resource.close()
+                    except Exception:
+                        pass
+            self.page = self.context = self.browser = None
+            print("[WEB_AGENT] state=closed")
 
     async def execute_function_calls(self, function_calls):
         results = []
@@ -60,7 +129,7 @@ class WebAgent:
                 if fn_name == "open_web_browser":
                     pass 
                 elif fn_name == "navigate":
-                    await self.page.goto(args["url"])
+                    await self.page.goto(args["url"], wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
                 elif fn_name == "go_back":
                     await self.page.go_back()
                 elif fn_name == "go_forward":
@@ -137,6 +206,7 @@ class WebAgent:
 
                 else:
                     print(f"[WARN] Warning: Model requested unimplemented function {fn_name}")
+                    result_data = {"error": {"code": "unsupported_action", "retryable": False}}
 
                 # Wait a moment for UI to settle
                 await asyncio.sleep(1)
@@ -183,7 +253,7 @@ class WebAgent:
             )
         return function_responses, screenshot_bytes
 
-    async def run_task(self, prompt, update_callback=None):
+    async def _run_task(self, prompt, update_callback=None):
         """
         Runs the agent with the given prompt.
         update_callback: async function(screenshot_b64: str, logs: str)
@@ -195,7 +265,8 @@ class WebAgent:
         async with async_playwright() as p:
             # Launch browser (Headless=True usually, but for dev we might keep it hidden)
             # Use headless=True for server deployment
-            self.browser = await p.chromium.launch(headless=True) 
+            print("[WEB_AGENT] state=browser_launch")
+            self.browser = await p.chromium.launch(headless=True)
             self.context = await self.browser.new_context(
                 viewport={"width": SCREEN_WIDTH, "height": SCREEN_HEIGHT},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -203,7 +274,8 @@ class WebAgent:
             self.page = await self.context.new_page()
             
             # Start at Google
-            await self.page.goto("https://www.google.com")
+            print("[WEB_AGENT] state=navigate url=https://www.google.com")
+            await self.page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
 
             config = types.GenerateContentConfig(
                 tools=[types.Tool(
@@ -245,9 +317,7 @@ class WebAgent:
                         config=config
                     )
                 except Exception as e:
-                    print(f"[CRITICAL] Critical API Error: {e}")
-                    if update_callback: await update_callback(None, f"Error: {e}")
-                    break
+                    raise RuntimeError(f"computer_use_provider_error: {e}") from e
                 
                 # Check for empty response
                 if not response.candidates:
@@ -310,8 +380,6 @@ class WebAgent:
                 response_parts = [types.Part(function_response=fr) for fr in function_responses]
                 chat_history.append(types.Content(role="user", parts=response_parts))
 
-            await self.browser.close()
-            print("[CLOSE] Browser closed.")
             return final_response
 
 if __name__ == "__main__":
