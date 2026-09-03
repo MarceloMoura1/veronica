@@ -13,6 +13,8 @@ backend/settings.json
 backend/last_cad_generation.json
 long_term_memory/
 projects/
+!src/components/projects/
+!src/components/projects/**
 output.stl
 cad_outputs/
 
@@ -45,6 +47,11 @@ data/telemetry/
 # Local development logs
 .codex-*.log
 .phase*.log
+runtime_voice_*.log
+
+# Local audio diagnostics
+debug_*.wav
 
 # Local runtime settings
 settings.json
+data/project_workspaces.json

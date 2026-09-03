@@ -19,6 +19,7 @@ import Sidebar, { SectionPlaceholder } from './components/Sidebar';
 import IntegrationCenter from './components/IntegrationCenter';
 import IntegrationReports from './components/IntegrationReports';
 import SystemTelemetryBar from './components/SystemTelemetryBar';
+import ProjectWorkspacePage from './components/projects/ProjectWorkspacePage';
 import { chatMessage, chatSender, mergeChatMessages, newChatId } from './chatHistory.mjs';
 import { applyTranscriptionEvent } from './voiceTranscript.mjs';
 
@@ -1759,6 +1760,8 @@ function App() {
                 <IntegrationCenter socket={socket} />
             ) : activeSection === 'reports' ? (
                 <IntegrationReports socket={socket} />
+            ) : activeSection === 'projects' ? (
+                <ProjectWorkspacePage />
             ) : (
                 <SectionPlaceholder section={activeSection} />
             )}

@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const http = require('http');
 const crypto = require('crypto');
 const { resolveProjectPython, backendIdentityMatches } = require('./pythonRuntime');
+const { registerProjectIpcHandlers } = require('./projectIpc');
 
 // Use ANGLE D3D11 backend - more stable on Windows while keeping WebGL working
 // This fixes "GPU state invalid after WaitForGetOffsetInRange" error
@@ -126,6 +127,8 @@ function startPythonBackend(pythonExecutable) {
 }
 
 app.whenReady().then(() => {
+    registerProjectIpcHandlers({ ipcMain, dialog, getParentWindow: () => mainWindow });
+
     ipcMain.on('window-minimize', () => {
         if (mainWindow) mainWindow.minimize();
     });
@@ -228,6 +231,7 @@ function waitForBackend() {
         };
         check();
     });
+
 }
 
 function getBackendStatus() {

@@ -9,6 +9,9 @@ if sys.platform == 'win32':
 import socketio
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import asyncio
 import threading
 import sys
@@ -31,10 +34,17 @@ from memory import ConversationContextBuilder, ConversationalMemoryAnalyzer, Per
 from integrations import IntegrationManager
 from chat_history import ChatHistoryStore
 from system_monitor import SystemMonitor, SystemMonitorTask
+from project_workspace import ProjectWorkspaceError, ProjectWorkspaceService
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "null"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 app_socketio = socketio.ASGIApp(sio, app)
 
 
@@ -55,6 +65,45 @@ async def emit_integration_registry(payload):
 
 integration_manager = IntegrationManager(event_callback=emit_integration_registry)
 chat_history = ChatHistoryStore(Path(__file__).resolve().parent.parent / "data" / "conversations" / "default.jsonl")
+project_workspaces = ProjectWorkspaceService()
+
+
+class ProjectRootRequest(BaseModel):
+    root_path: str
+
+
+class ProjectFolderRequest(BaseModel):
+    parent_path: str = ""
+    name: str
+
+
+class ProjectTextFileRequest(BaseModel):
+    parent_path: str = ""
+    name: str
+    content: str
+
+
+class ProjectItemRequest(BaseModel):
+    relative_path: str = ""
+
+
+class ProjectRenameRequest(BaseModel):
+    relative_path: str
+    name: str
+
+
+class ProjectWorkspaceCreateRequest(BaseModel):
+    name: str
+    root_path: str | None = None
+    parent_path: str | None = None
+    folder_name: str | None = None
+    description: str = ""
+    icon: str = "folder"
+    type: str = "general"
+
+
+def project_error_response(error: ProjectWorkspaceError):
+    return JSONResponse(status_code=error.status, content=error.payload())
 
 
 async def emit_system_status(payload):
@@ -197,6 +246,124 @@ async def status():
         "python_executable": sys.executable,
         "python_version": platform.python_version(),
     }
+
+
+@app.get("/api/project-workspaces")
+async def list_project_workspaces():
+    try:
+        return {"ok": True, "projects": await asyncio.to_thread(project_workspaces.list_projects)}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.post("/api/project-workspaces")
+async def create_project_workspace(request: ProjectWorkspaceCreateRequest):
+    try:
+        project = await asyncio.to_thread(
+            project_workspaces.create_workspace,
+            request.name,
+            root_path=request.root_path,
+            parent_path=request.parent_path,
+            folder_name=request.folder_name,
+            description=request.description,
+            icon=request.icon,
+            project_type=request.type,
+        )
+        return {"ok": True, "project": project}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.delete("/api/project-workspaces/{project_id}")
+async def remove_project_workspace(project_id: str):
+    try:
+        result = await asyncio.to_thread(project_workspaces.remove_workspace, project_id)
+        return {"ok": True, "result": result}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.put("/api/project-workspaces/{project_id}/root")
+async def configure_project_root(project_id: str, request: ProjectRootRequest):
+    try:
+        project = await asyncio.to_thread(project_workspaces.configure_root, project_id, request.root_path)
+        return {"ok": True, "project": project}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.get("/api/project-workspaces/{project_id}/directory")
+async def list_project_directory(project_id: str, path: str = ""):
+    try:
+        directory = await asyncio.to_thread(project_workspaces.list_directory, project_id, path)
+        return {"ok": True, **directory}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.post("/api/project-workspaces/{project_id}/folders")
+async def create_project_folder(project_id: str, request: ProjectFolderRequest):
+    try:
+        item = await asyncio.to_thread(
+            project_workspaces.create_folder, project_id, request.parent_path, request.name
+        )
+        return {"ok": True, "item": item}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.post("/api/project-workspaces/{project_id}/text-files")
+async def create_project_text_file(project_id: str, request: ProjectTextFileRequest):
+    try:
+        item = await asyncio.to_thread(
+            project_workspaces.save_text_file,
+            project_id,
+            request.parent_path,
+            request.name,
+            request.content,
+        )
+        return {"ok": True, "item": item}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+@app.patch("/api/project-workspaces/{project_id}/items")
+async def rename_project_item(project_id: str, request: ProjectRenameRequest):
+    try:
+        item = await asyncio.to_thread(
+            project_workspaces.rename_item, project_id, request.relative_path, request.name
+        )
+        return {"ok": True, "item": item}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+
+
+def _open_workspace_item(target: str, reveal: bool) -> None:
+    import subprocess
+
+    if sys.platform == "win32":
+        if reveal and Path(target).is_file():
+            subprocess.Popen(["explorer.exe", "/select,", target])
+        elif reveal:
+            subprocess.Popen(["explorer.exe", target])
+        else:
+            os.startfile(target)
+        return
+    subprocess.Popen(["xdg-open", str(Path(target).parent if reveal and Path(target).is_file() else target)])
+
+
+@app.post("/api/project-workspaces/{project_id}/open")
+async def open_project_item(project_id: str, request: ProjectItemRequest, reveal: bool = False):
+    try:
+        target = await asyncio.to_thread(project_workspaces.get_open_target, project_id, request.relative_path)
+        await asyncio.to_thread(_open_workspace_item, target, reveal)
+        return {"ok": True}
+    except ProjectWorkspaceError as error:
+        return project_error_response(error)
+    except PermissionError:
+        return project_error_response(ProjectWorkspaceError("permission_denied", "Permissão negada.", 403))
+    except OSError:
+        return project_error_response(ProjectWorkspaceError("io_error", "Não foi possível abrir o item.", 500))
 
 @sio.event
 async def connect(sid, environ):

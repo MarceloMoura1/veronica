@@ -112,3 +112,21 @@
 {"id":"e10fa4fd-6483-4389-b036-1ab74c0eb9d1","role":"user","content":"Alô Verónica está meu olho.","timestamp":"2026-08-09T01:41:59.471581+00:00","source":"voice"}
 {"id":"b64d7f91-4c62-45ad-817c-37750ba7e6b9","role":"assistant","content":"Olá, Chefe! Perfeitamente. Em que posso servi-lo hoje?","timestamp":"2026-08-09T01:41:59.477086+00:00","source":"assistant"}
 {"id":"30586c72-1d4c-47ad-8296-1021984918cb","role":"user","content":"Fale sobre o Christyan","timestamp":"2026-08-09T02:25:27.709000+00:00","source":"text"}
+{"id":"voice-user-c2a6508e-6639-48f1-ae0b-c7f5cb21d20c","role":"user","content":"Oda está me ouvindo? Alô Verónica.","timestamp":"2026-08-09T14:57:44.913464+00:00","source":"voice"}
+{"id":"voice-assistant-6fcbd588-83f1-4fb3-adba-c3248a851ef3","role":"assistant","content":"Olá, Chefe! Tudo bem? Pronto para mais um dia de criação e desenvolvimento?","timestamp":"2026-08-09T14:58:02.497079+00:00","source":"assistant"}
+{"id":"voice-user-bcab7056-f472-4dfb-a4d7-ace870fa3834","role":"user","content":"Bora lá.","timestamp":"2026-08-09T14:58:15.959105+00:00","source":"voice"}
+{"id":"voice-assistant-0a3e40ad-54ce-47ce-b99a-068982aa269c","role":"assistant","content":"Excelente! Nossas prioridades continuam firmes: MegaDesk, FaYerS, Jarvis e, claro, eu. Em que posso te ajudar hoje?","timestamp":"2026-08-09T14:58:17.523901+00:00","source":"assistant"}
+{"id":"voice-user-284069c8-6a75-438a-9254-930d6b7813e7","role":"user","content":"Con se gue abrir o YouTube?","timestamp":"2026-08-09T14:58:42.379665+00:00","source":"voice"}
+{"id":"voice-assistant-0aba9cb6-4046-41a2-8b7b-79a0e29cff0b","role":"assistant","content":"Abrindo o YouTube, Chefe.","timestamp":"2026-08-09T14:58:44.975295+00:00","source":"assistant"}
+{"id":"voice-assistant-081befac-4221-42b6-9f28-2903d2ea362e","role":"assistant","content":"...","timestamp":"2026-08-09T14:58:47.354797+00:00","source":"assistant"}
+{"id":"voice-assistant-0d1fc312-a941-4cca-ba67-c4668b5c7bca","role":"assistant","content":"Sinto muito, Chefe, mas houve um problemao tentar abrir o YouTube. Parece que a cota de uso foi excedida. Há algo mais que eu possa fazer?","timestamp":"2026-08-09T14:58:48.220706+00:00","source":"assistant"}
+{"id":"voice-user-fd101d3f-ebeb-4798-a0bd-c5c9b1ef5be3","role":"user","content":"Car alho, ficou massa, mano.","timestamp":"2026-08-09T15:43:36.769021+00:00","source":"voice"}
+{"id":"voice-assistant-189f01eb-1347-4e6c-9cda-1c89241922f0","role":"assistant","content":"Ficou mesmo, Chefe! Manda brasa, o que você quer fazer agora?","timestamp":"2026-08-09T15:43:38.783669+00:00","source":"assistant"}
+{"id":"voice-user-da35b580-7c55-4397-a2c4-f7d4916af7c0","role":"user","content":"Oi, veron.","timestamp":"2026-08-09T15:43:40.806634+00:00","source":"voice"}
+{"id":"voice-assistant-d2b091de-6cb0-4ea1-989d-5bd14e931093","role":"assistant","content":"E aí, Chefe? Tudo bem?","timestamp":"2026-08-09T15:43:42.167734+00:00","source":"assistant"}
+{"id":"voice-user-bb920767-f222-4b00-9252-5bbecbbc6e23","role":"user","content":"Ada está me ouvindo?","timestamp":"2026-08-09T21:55:05.385813+00:00","source":"voice"}
+{"id":"voice-assistant-9e851352-065d-4e93-8e9d-a7b4d8f577cd","role":"assistant","content":"Estou sim, Chefe! É Verônica, não Ada. Como posso ajudar?","timestamp":"2026-08-09T21:55:07.141213+00:00","source":"assistant"}
+{"id":"voice-user-069cc702-c906-4352-abd2-8e0581ba4a6b","role":"user","content":"Eu sempre esqueço.","timestamp":"2026-08-09T21:55:13.787912+00:00","source":"voice"}
+{"id":"voice-assistant-3be390e2-42b6-449e-b43d-f91b3deb47f4","role":"assistant","content":"Sem problemas, Chefe! Acontece. O que te traz aqui?","timestamp":"2026-08-09T21:55:15.153630+00:00","source":"assistant"}
+{"id":"voice-user-80edc841-b3ac-4a86-99ea-72cee8310baa","role":"user","content":"E quele falou sobre Eduardo para você?","timestamp":"2026-08-09T22:25:00.061659+00:00","source":"voice"}
+{"id":"voice-assistant-95e02f7f-8b60-43a7-bab3-e9852ce9e562","role":"assistant","content":"Chefe, não tenho nenhum registro de uma conversa sobre o Eduardo.","timestamp":"2026-08-09T22:25:03.796305+00:00","source":"assistant"}
